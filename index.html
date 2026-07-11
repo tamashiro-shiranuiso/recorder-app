@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>レコーダーアプリ</title>
+    <style>
+        /* 🎨 1画面確定（スクロール絶対禁止）デザイン */
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100dvh;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .container {
+            background-color: #fff;
+            padding: 30px 24px;
+            width: 100%;
+            height: 100dvh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* ⚙️ 設定ボタンの配置 */
+        .header-actions {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+        }
+        #configBtn {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 5px;
+            transition: transform 0.2s;
+        }
+        #configBtn:active { transform: rotate(45deg) scale(0.9); }
+        
+        h2 { 
+            margin-top: 0;
+            margin-bottom: 25px; 
+            color: #2c3e50; 
+            font-size: 26px;
+        }
+        
+        .input-group {
+            margin-bottom: 25px;
+            text-align: left;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #7f8c8d;
+            font-size: 15px;
+        }
+        .input-row {
+            display: flex;
+            gap: 10px;
+        }
+        
+        input[type="text"] {
+            flex: 1;
+            padding: 14px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 18px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        input[type="text"]:focus {
+            border-color: #3498db;
+        }
+        
+        #speechBtn {
+            width: 60px;
+            padding: 0;
+            background-color: #2ecc71;
+            color: white;
+            font-size: 22px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }
+        #speechBtn:active { transform: scale(0.95); }
+        #speechBtn.recognizing { background-color: #e74c3c; } 
+        #speechBtn.recognizing:hover { background-color: #c0392b; }
+        #speechBtn:disabled { background-color: #bdc3c7; cursor: not-allowed; }
+
+        button.action-btn {
+            width: 100%;
+            padding: 18px;
+            font-size: 20px;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 15px;
+            transition: background 0.2s, transform 0.1s;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        button.action-btn:active { transform: scale(0.98); }
+        
+        #startBtn { background-color: #3498db; color: white; }
+        #startBtn:hover { background-color: #2980b9; }
+        #startBtn:disabled { background-color: #bdc3c7; cursor: not-allowed; box-shadow: none; }
+        
+        #stopBtn { background-color: #e74c3c; color: white; }
+        #stopBtn:hover { background-color: #c0392b; }
+        #stopBtn:disabled { background-color: #bdc3c7; cursor: not-allowed; box-shadow: none; }
+
+        #status {
+            margin-top: 15px;
+            font-weight: bold;
+            color: #e67e22;
+            font-size: 16px;
+            min-height: 24px;
+            margin-bottom: 0;
+        }
+
+        /* 🔒 URL設定用モーダル（ポップアップ） */
+        .modal {
+            display: none; /* 初期状態は非表示 */
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            padding: 20px;
+        }
+        .modal-content {
+            background-color: #fff;
+            padding: 25px;
+            border-radius: 12px;
+            width: 100%;
+            max-width: 450px;
+            text-align: left;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        .modal h3 { margin-top: 0; color: #2c3e50; }
+        .modal p { font-size: 13px; color: #7f8c8d; line-height: 1.5; }
+        .modal input { width: 100%; margin-bottom: 15px; padding: 12px; font-size: 14px; border: 2px solid #e0e0e0; border-radius: 6px; }
+        .modal-buttons { display: flex; gap: 10px; }
+        .modal-buttons button { flex: 1; padding: 12px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; }
+        #saveConfigBtn { background-color: #2ecc71; color: white; }
+        #closeConfigBtn { background-color: #e74c3c; color: white; }
+
+        @media (min-width: 500px) {
+            body { padding: 20px; height: 100vh; overflow: auto; }
+            .container { height: auto; max-width: 500px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); padding: 40px; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header-actions">
+        <button id="configBtn" title="設定">⚙️</button>
+    </div>
+
+    <h2>🎙 レコーダーアプリ</h2>
+    
+    <div class="input-group">
+        <label for="meetingName">会議名（任意）</label>
+        <div class="input-row">
+            <input type="text" id="meetingName" placeholder="例：営業定例、XXプロジェクト">
+            <button id="speechBtn" title="音声で入力">🎤</button>
+        </div>
+    </div>
+    
+    <button id="startBtn" class="action-btn">🔴 録音開始</button>
+    <button id="stopBtn" class="action-btn" disabled>⏹ 録音停止・ドライブへ保存</button>
+    
+    <div id="status"></div>
+</div>
+
+<div id="configModal" class="modal">
+    <div class="modal-content">
+        <h3>⚙️ 初期設定</h3>
+        <p>ご自身のGoogle Apps Script (GAS) でデプロイした「ウェブアプリのURL」を入力してください。音声データは該当のGoogleドライブに保存されます。</p>
+        <input type="text" id="gasUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
+        <div class="modal-buttons">
+            <button id="saveConfigBtn">保存する</button>
+            <button id="closeConfigBtn">閉じる</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let mediaRecorder;
+    let audioChunks = [];
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const speechBtn = document.getElementById('speechBtn');
+    const meetingNameInput = document.getElementById('meetingName');
+    const statusDiv = document.getElementById('status');
+    
+    // モーダル関連要素
+    const configBtn = document.getElementById('configBtn');
+    const configModal = document.getElementById('configModal');
+    const gasUrlInput = document.getElementById('gasUrlInput');
+    const saveConfigBtn = document.getElementById('saveConfigBtn');
+    const closeConfigBtn = document.getElementById('closeConfigBtn');
+
+    // 💡 起動時に端末のメモリ(LocalStorage)からURLを読み込む
+    let savedGasUrl = localStorage.getItem('user_gas_url') || "";
+    gasUrlInput.value = savedGasUrl;
+
+    // URLが未設定なら案内を出す
+    if (!savedGasUrl) {
+        statusDiv.textContent = "⚠️ 右上の⚙️ボタンからGASのURLを設定してください";
+    }
+
+    // ⚙️ モーダルの開閉処理
+    configBtn.addEventListener('click', () => configModal.style.display = 'flex');
+    closeConfigBtn.addEventListener('click', () => configModal.style.display = 'none');
+    
+    // ⚙️ URLの保存処理
+    saveConfigBtn.addEventListener('click', () => {
+        const url = gasUrlInput.value.trim();
+        if (!url || !url.startsWith('https://script.google.com')) {
+            alert('正しいGASのウェブアプリURLを入力してください（最後が /exec で終わるもの）');
+            return;
+        }
+        localStorage.setItem('user_gas_url', url);
+        savedGasUrl = url;
+        configModal.style.display = 'none';
+        statusDiv.textContent = "✅ GASのURLを設定しました";
+    });
+
+    // --- 音声入力機能 ---
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    
+    if (!SpeechRecognition) {
+        speechBtn.style.display = 'none'; 
+    } else {
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'ja-JP';
+        recognition.interimResults = false;
+        let isRecognizing = false;
+
+        speechBtn.addEventListener('click', () => {
+            if (isRecognizing) {
+                recognition.abort(); 
+                statusDiv.textContent = "🛑 音声入力をキャンセルしました";
+            } else {
+                recognition.start(); 
+                statusDiv.textContent = "🎤 会議名を喋ってください...";
+                isRecognizing = true;
+                speechBtn.textContent = "⏹";
+                speechBtn.classList.add('recognizing');
+            }
+        });
+
+        recognition.onresult = (event) => {
+            meetingNameInput.value = event.results[0][0].transcript;
+            statusDiv.textContent = "🔊 音声入力を完了しました";
+        };
+
+        recognition.onend = () => {
+            isRecognizing = false;
+            speechBtn.textContent = "🎤";
+            speechBtn.classList.remove('recognizing');
+            if (statusDiv.textContent === "🎤 会議名を喋ってください...") {
+                statusDiv.textContent = "";
+            }
+        };
+
+        recognition.onerror = (event) => {
+            if (event.error !== 'aborted') {
+                statusDiv.textContent = "❌ 音声認識に失敗しました";
+            }
+        };
+    }
+
+    // --- 録音およびデータ送信機能 ---
+    startBtn.addEventListener('click', async () => {
+        // 送信直前にURL設定チェック
+        if (!savedGasUrl) {
+            alert('録音を開始する前に、右上の⚙️ボタンからご自身のGAS URLを設定してください。');
+            configModal.style.display = 'flex';
+            return;
+        }
+
+        try {
+            statusDiv.textContent = "マイクを準備中...";
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) audioChunks.push(event.data);
+            };
+
+            mediaRecorder.onstop = async () => {
+                statusDiv.textContent = "音声データを送信形式に変換中...";
+                const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                const meetingName = meetingNameInput.value.trim() || "名称未設定会議";
+
+                const reader = new FileReader();
+                reader.readAsDataURL(audioBlob);
+                reader.onloadend = async () => {
+                    const base64Data = reader.result.split(',')[1]; 
+                    const mimeType = mediaRecorder.mimeType;
+
+                    const params = new URLSearchParams();
+                    params.append('audio', base64Data);
+                    params.append('mimeType', mimeType);
+                    params.append('name', meetingName);
+
+                    statusDiv.textContent = "Googleドライブへ保存中...";
+
+                    try {
+                        // 💡 記憶させた各自のURL（savedGasUrl）に対して送信！
+                        const response = await fetch(savedGasUrl, { 
+                            method: 'POST', 
+                            body: params,
+                            headers: {
+                                'Content-Type': 'application/x-www-form-urlencoded'
+                            }
+                        });
+                        const result = await response.json();
+                        
+                        if (response.ok && result.status === "success") {
+                            statusDiv.textContent = "✅ ドライブへの保存が完了しました！";
+                        } else {
+                            statusDiv.textContent = "❌ 保存に失敗しました: " + (result.message || "エラー");
+                        }
+                    } catch (error) {
+                        console.error(error);
+                        statusDiv.textContent = "❌ 通信エラー：GAS側の公開権限（全員になっているか）を確認してください。";
+                    }
+
+                    startBtn.disabled = false;
+                    meetingNameInput.disabled = false;
+                    if (SpeechRecognition) speechBtn.disabled = false;
+                };
+            };
+
+            mediaRecorder.start();
+            statusDiv.textContent = "🎙 録音中...";
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            meetingNameInput.disabled = true; 
+            if (SpeechRecognition) speechBtn.disabled = true;
+
+        } catch (err) {
+            statusDiv.textContent = "";
+            alert('マイクの許可がないか、デバイスエラーが発生しました: ' + err.message);
+        }
+    });
+
+    stopBtn.addEventListener('click', () => {
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach(track => track.stop());
+        stopBtn.disabled = true;
+    });
+</script>
+
+</body>
+</html>
