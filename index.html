@@ -468,7 +468,6 @@
       if (["体調", "受診", "入院", "救急搬送"].some(el => r.type.includes(el))) { badgeColor = "bg-primary"; borderLeftColor = "#0d6efd"; }
       if (["ヒヤリハット", "事故", "トラブル・苦情"].some(el => r.type.includes(el))) { badgeColor = "bg-danger"; borderLeftColor = "#dc3545"; }
 
-      // ★修正ボタン(editRecord)を追加
       container.innerHTML += `
         <div class="p-3 mb-3 record-card shadow-sm border" style="border-left-color: ${borderLeftColor};">
           <div class="d-flex justify-content-between align-items-center mb-2">
@@ -485,19 +484,16 @@
     });
   }
 
-  // ★修正モードの起動処理
   window.editRecord = function(id) {
     const rec = globalRecords.find(r => r.id === id);
     if(!rec) return;
 
-    // 複数人入力を強制的にOFFにして非表示にする
     const multiSwitch = document.getElementById('multiUserSwitch');
     if (multiSwitch.checked) multiSwitch.click();
-    document.getElementById('multiSwitchContainer').classList.add('d-none'); // 修正時は複数人を隠す
+    document.getElementById('multiSwitchContainer').classList.add('d-none');
 
     document.getElementById('editRecordId').value = rec.id;
     
-    // 日時のフォーマット変換
     const dateParts = rec.date.split(' ');
     if (dateParts.length === 2) {
       document.getElementById('date').value = dateParts[0].replace(/\//g, '-') + 'T' + dateParts[1];
@@ -507,7 +503,6 @@
     document.getElementById('staff').value = rec.staff;
     document.getElementById('note').value = rec.note;
 
-    // 種別ボタンの復元
     document.querySelectorAll('.type-btn').forEach(b => {
       b.className = `btn ${b.dataset.baseColor} w-100 type-btn`; 
       if (b.dataset.typeValue === rec.type) {
@@ -517,7 +512,6 @@
     });
     document.getElementById('selectedType').value = rec.type;
     
-    // ボタンの見た目変更
     document.getElementById('submitBtn').innerText = "✏️ 修正を保存する";
     document.getElementById('submitBtn').classList.replace("btn-primary", "btn-warning");
     document.getElementById('cancelEditBtn').classList.remove("d-none");
@@ -526,7 +520,6 @@
     window.scrollTo(0, 0);
   }
 
-  // ★修正のキャンセル処理
   window.cancelEdit = function() {
     document.getElementById('editRecordId').value = "";
     document.getElementById('recordForm').reset();
@@ -537,7 +530,7 @@
     const now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
     document.getElementById('date').value = now.toISOString().slice(0, 16);
 
-    document.getElementById('multiSwitchContainer').classList.remove('d-none'); // 複数人入力を再表示
+    document.getElementById('multiSwitchContainer').classList.remove('d-none');
     document.getElementById('submitBtn').innerText = "登録する";
     document.getElementById('submitBtn').classList.replace("btn-warning", "btn-primary");
     document.getElementById('cancelEditBtn').classList.add("d-none");
@@ -566,22 +559,58 @@
     } catch (error) { alert("通信エラーが発生しました。"); console.error(error); btn.disabled = false; btn.innerHTML = originalText; }
   }
 
+  // ★ 音声入力の仕組み（スマホでの連呼防止＆安全装置付き）
   const voiceBtn = document.getElementById('voiceBtn'); const noteArea = document.getElementById('note');
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (SpeechRecognition) {
-    const recognition = new SpeechRecognition(); recognition.lang = 'ja-JP'; recognition.continuous = true; recognition.interimResults = false;
+    const recognition = new SpeechRecognition(); 
+    recognition.lang = 'ja-JP'; 
+    recognition.continuous = true; 
+    recognition.interimResults = false;
     let isRecording = false;
+    
     voiceBtn.addEventListener('click', () => {
-      if (!isRecording) { recognition.start(); voiceBtn.innerHTML = "🔴 録音中...（もう一度押すと停止）"; voiceBtn.classList.replace('btn-voice', 'btn-danger'); isRecording = true; }
-      else { recognition.stop(); voiceBtn.innerHTML = "🎤 音声入力スタート（ここを押して話す）"; voiceBtn.classList.replace('btn-danger', 'btn-voice'); isRecording = false; }
+      if (!isRecording) { 
+        recognition.start(); 
+        voiceBtn.innerHTML = "🔴 録音中...（もう一度押すと停止）"; 
+        voiceBtn.classList.replace('btn-voice', 'btn-danger'); 
+        isRecording = true; 
+      } else { 
+        recognition.stop(); 
+        voiceBtn.innerHTML = "🎤 音声入力スタート（ここを押して話す）"; 
+        voiceBtn.classList.replace('btn-danger', 'btn-voice'); 
+        isRecording = false; 
+      }
     });
-    recognition.onresult = (event) => { const transcript = event.results[event.results.length - 1][0].transcript; noteArea.value += transcript + " "; };
-  } else { voiceBtn.style.display = "none"; alert("このブラウザは音声入力に対応していません。"); }
 
-  // ★送信・修正処理
+    recognition.onresult = (event) => {
+      let finalTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        }
+      }
+      if (finalTranscript !== '') {
+        noteArea.value += finalTranscript + "\n"; 
+      }
+    };
+
+    recognition.onend = () => {
+      if (isRecording) {
+        voiceBtn.innerHTML = "🎤 音声入力スタート（ここを押して話す）";
+        voiceBtn.classList.replace('btn-danger', 'btn-voice');
+        isRecording = false;
+      }
+    };
+    
+  } else { 
+    voiceBtn.style.display = "none"; 
+    alert("このブラウザは音声入力に対応していません。"); 
+  }
+
   document.getElementById('submitBtn').addEventListener('click', async () => {
     const editId = document.getElementById('editRecordId').value;
-    const isEditMode = !!editId; // IDがあれば修正モード
+    const isEditMode = !!editId; 
     
     const rawDate = document.getElementById('date').value;
     const staff = document.getElementById('staff').value;
@@ -590,7 +619,6 @@
 
     let usersToSave = [];
     
-    // 修正モード時は単独ユーザー、新規登録時はスイッチの状態を見て判定
     if (isEditMode) {
       usersToSave = [document.getElementById('user').value];
     } else {
@@ -619,7 +647,7 @@
     const payload = { 
       action: isEditMode ? "updateRecord" : "saveRecord",
       date: date, 
-      users: usersToSave, // 常に配列として送信する
+      users: usersToSave,
       staff: staff, 
       type: type, 
       note: note 
@@ -633,10 +661,9 @@
       if(result.status === "success") {
         alert(isEditMode ? "記録を修正しました！" : "記録を保存しました！");
         
-        // 保存成功後、最新データを裏で再取得して手元のデータを完璧に同期する
         await fetchInitialRecords();
 
-        if (isEditMode) cancelEdit(); // 修正モードを解除してUIを元に戻す
+        if (isEditMode) cancelEdit(); 
         else {
           document.getElementById('note').value = "";
           document.querySelectorAll('.type-btn').forEach(b => b.className = `btn ${b.dataset.baseColor} w-100 type-btn`);
@@ -644,7 +671,7 @@
           document.querySelectorAll('.category-body').forEach(b => b.classList.add('d-none'));
           document.querySelectorAll('.category-arrow').forEach(a => a.innerText = "🔽");
           document.getElementById('selectedType').value = "";
-          selectAllUsers(false); // 複数人チェックをクリア
+          selectAllUsers(false);
         }
       } else { alert("処理に失敗しました: " + result.message); }
     } catch (error) { alert("通信エラーが発生しました。"); console.error(error); }
