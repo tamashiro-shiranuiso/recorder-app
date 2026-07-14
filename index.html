@@ -293,6 +293,7 @@
 <script>
     let mediaRecorder;
     let audioChunks = [];
+    let localStream = null; // 🌟 端末依存エラーを防ぐため、マイクのストリームを安全に保持する変数
 
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
@@ -396,9 +397,10 @@
 
         try {
             statusDiv.textContent = "マイクを準備中...";
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             
-            // 端末依存を吸収しつつ、AIが認識できるギリギリの「32kbps」に圧縮
+            // 🌟 修正：取得したマイクデータを安全なグローバル変数に退避
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
             let options = { 
                 mimeType: 'audio/webm',
                 audioBitsPerSecond: 32000 
@@ -410,7 +412,8 @@
                 };
             }
 
-            mediaRecorder = new MediaRecorder(stream, options);
+            // 🌟 修正：退避したストリームをレコーダーにセット
+            mediaRecorder = new MediaRecorder(localStream, options);
             audioChunks = [];
 
             mediaRecorder.ondataavailable = (event) => {
@@ -557,6 +560,20 @@
         }
     });
 
+    // ⏹ 停止ボタンの処理
+    stopBtn.addEventListener('click', () => {
+        // 🌟 修正：レコーダーを止める
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+            mediaRecorder.stop();
+        }
+        // 🌟 修正：グローバルに保持したマイク（ストリーム）を安全かつ確実にオフにする
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+        }
+        stopBtn.disabled = true;
+        stopBtn.textContent = "⏳ 処理中... お待ちください";
+    });
+
     function resetButtons() {
         startBtn.style.display = "block";
         startBtn.disabled = false;
@@ -568,6 +585,3 @@
         if (SpeechRecognition) speechBtn.disabled = false;
     }
 </script>
-
-</body>
-</html>
