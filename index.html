@@ -273,8 +273,8 @@
     </div>
 </div>
 
-<!-- 現場監督（ミドルエンド）のプログラムを読み込む -->
-<script src="js/recorder-controller.js?v=2.0"></script>
+<!-- キャッシュ強制回避用のバージョン記述を追加(v=2.1) -->
+<script src="js/recorder-controller.js?v=2.1"></script>
 
 <script>
     // ==========================================
@@ -286,9 +286,11 @@
     
     const AppState = {
         isRecording: false,
-        mediaRecorder: null,
+        currentRecorder: null,    // 🌟 現在のアクティブなレコーダーインスタンス
+        globalStream: null,       // 🌟 永続化されたマイクストリーム
+        chunkTimeout: null,       // 🌟 自動切替タイマー
         currentChunkIndex: 0,
-        audioBlobs: [], // 🌟 蓄積用：すべての音声パーツを貯めておく配列
+        audioBlobs: [],           // すべての音声パーツ(Blob)を貯める配列
         mimeType: 'audio/webm'
     };
 
@@ -412,55 +414,24 @@
 
     async function startRecording() {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            // 🌟 1. マイクのアクセスストリームを1回だけ取得して永続保持
+            AppState.globalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
             
-            // 端末依存の吸収
-            let options = {};
-            let mimeType = 'audio/webm';
-            
-            if (MediaRecorder.isTypeSupported('audio/webm')) {
-                options = { mimeType: 'audio/webm' };
-                mimeType = 'audio/webm';
-            } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-                options = { mimeType: 'audio/mp4' };
-                mimeType = 'audio/mp4';
-            }
-
-            AppState.mimeType = mimeType;
-            AppState.mediaRecorder = new MediaRecorder(stream, options);
+            AppState.isRecording = true;
             AppState.currentChunkIndex = 0;
-            AppState.audioBlobs = []; // 🌟 音声蓄積配列をリセット
+            AppState.audioBlobs = [];
             
             UI.dotsGrid.innerHTML = '';
             if (window.appController) window.appController.state.chunks = [];
 
-            AppState.isRecording = true;
             UI.mainRecordBtn.classList.add('recording');
             UI.mainRecordBtn.innerHTML = "⏹";
             UI.statusText.innerHTML = "🔴 録音中... (タップして終了)";
             UI.statusText.style.color = "#fa5252";
             UI.progressContainer.style.display = "none";
 
-            AppState.mediaRecorder.ondataavailable = async (e) => {
-                if (e.data.size > 0 && window.appController) {
-                    // 🌟 1. 裏での統合用に全音声パーツのBlobを配列に蓄積
-                    AppState.audioBlobs.push(e.data);
-
-                    // 2. 文字起こし送信用にBase64に変換して現場監督へ
-                    const base64 = await blobToBase64(e.data);
-                    const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
-                    window.appController.addAudioChunk(base64, AppState.currentChunkIndex, mimeType, meetingName);
-                    
-                    const dot = document.createElement('div');
-                    dot.className = 'dot';
-                    dot.id = `dot-${AppState.currentChunkIndex}`;
-                    UI.dotsGrid.appendChild(dot);
-                    
-                    AppState.currentChunkIndex++;
-                }
-            };
-
-            AppState.mediaRecorder.start(APP_CONFIG.CHUNK_INTERVAL_MS); 
+            // 🌟 2. 連続ファイル生成のための録音ループ処理を開始
+            recordNextChunk();
 
         } catch (err) {
             alert("マイクのアクセスが許可されませんでした。ブラウザの設定を確認してください。");
@@ -468,10 +439,87 @@
         }
     }
 
+    // 🌟 連続分割録音ループ（各チャンクが完全に独立した正しい音声ファイルになります）
+    async function recordNextChunk() {
+        if (!AppState.isRecording) return;
+
+        // 端末の対応フォーマット自動判定
+        let options = {};
+        let mimeType = 'audio/webm';
+        
+        if (MediaRecorder.isTypeSupported('audio/webm')) {
+            options = { mimeType: 'audio/webm' };
+            mimeType = 'audio/webm';
+        } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+            options = { mimeType: 'audio/mp4' };
+            mimeType = 'audio/mp4';
+        }
+        AppState.mimeType = mimeType;
+
+        // 保持した同一のストリームを元に、新しいレコーダーインスタンスを生成
+        const recorder = new MediaRecorder(AppState.globalStream, options);
+        AppState.currentRecorder = recorder;
+        let localChunkBlobs = [];
+
+        recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) {
+                localChunkBlobs.push(e.data);
+                AppState.audioBlobs.push(e.data); // 最終合体用
+            }
+        };
+
+        // このレコーダーが「止まった（確定した）」時の処理
+        recorder.onstop = async () => {
+            if (localChunkBlobs.length > 0) {
+                // ヘッダー情報が完全に書き込まれた、完結した独立音声ファイルを生成
+                const blob = new Blob(localChunkBlobs, { type: mimeType });
+                const base64 = await blobToBase64(blob);
+                const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
+                
+                // 現場監督に送信指示（100%ヘッダー完備の音データのため、Geminiが絶対にパニックを起こしません）
+                if (window.appController) {
+                    window.appController.addAudioChunk(base64, AppState.currentChunkIndex, mimeType, meetingName);
+                }
+
+                // UIドットを追加
+                const dot = document.createElement('div');
+                dot.className = 'dot';
+                dot.id = `dot-${AppState.currentChunkIndex}`;
+                UI.dotsGrid.appendChild(dot);
+                
+                AppState.currentChunkIndex++;
+            }
+
+            // 録音ステータスが「中」なら、すぐに次のレコーダーを開始して隙間なく録音を繋ぐ
+            if (AppState.isRecording) {
+                recordNextChunk();
+            }
+        };
+
+        recorder.start();
+
+        // 指定時間が来たら自動で停止処理をして、onstopイベントを誘発（次のレコーダーへバトンタッチ）
+        AppState.chunkTimeout = setTimeout(() => {
+            if (recorder.state === "recording") {
+                recorder.stop();
+            }
+        }, APP_CONFIG.CHUNK_INTERVAL_MS);
+    }
+
     async function stopRecordingAndProcess() {
+        // 🌟 再帰ループを停止するため、即座にフラグを下ろす
         AppState.isRecording = false;
-        AppState.mediaRecorder.stop();
-        AppState.mediaRecorder.stream.getTracks().forEach(track => track.stop());
+        clearTimeout(AppState.chunkTimeout);
+
+        // 現在動いている最後のレコーダーを直ちに終了させてファイナライズ
+        if (AppState.currentRecorder && AppState.currentRecorder.state === "recording") {
+            AppState.currentRecorder.stop();
+        }
+
+        // 赤ランプを消すため、マイクの物理接続を完全にオフ
+        if (AppState.globalStream) {
+            AppState.globalStream.getTracks().forEach(track => track.stop());
+        }
 
         UI.mainRecordBtn.classList.remove('recording');
         UI.mainRecordBtn.innerHTML = "🎤";
@@ -481,6 +529,7 @@
         UI.progressContainer.style.display = "block";
         UI.progressTitle.innerHTML = "AIが音声を処理中...";
         
+        // 最後の1パーツのonstop処理が安全に終了するのを待ってからGASへ総仕上げ命令
         setTimeout(async () => {
             try {
                 if (!window.appController) throw new Error("現場監督のプログラムが読み込まれていません。");
@@ -488,15 +537,14 @@
                 const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
                 const templateType = UI.templateSelect.value;
                 
-                // 🌟 蓄積したすべてのパーツBlobを、1本の綺麗な全体音声Blobに合体！
+                // 蓄積された音声データを1本化
                 const fullAudioBlob = new Blob(AppState.audioBlobs, { type: AppState.mimeType });
                 const fullAudioBase64 = await blobToBase64(fullAudioBlob);
 
-                // 🚀 現場監督に全体音声データを引き渡して処理開始指示
                 const result = await window.appController.processAllChunks(
                     meetingName, 
                     templateType, 
-                    fullAudioBase64, // 🌟 統合された音声データ
+                    fullAudioBase64, 
                     updateProgressUI
                 );
                 
@@ -523,7 +571,7 @@
                 UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
                 UI.statusText.style.color = "#fa5252";
             }
-        }, 1000);
+        }, 1500); // 猶予時間を1.5秒に調整
     }
 
     function blobToBase64(blob) {
