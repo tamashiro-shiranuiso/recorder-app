@@ -2,131 +2,112 @@
  * レコーダーアプリ ミドルエンド（現場監督）
  * 役割：録音データの管理、進捗の記憶、GASへの並列送信＆自動リトライ、最終結合
  */
+
+// ==========================================
+// 🔧 設定エリア（変更しやすいように一番上に配置）
+// ==========================================
+const CONFIG = {
+    GAS_URL: "https://script.google.com/macros/s/AKfycbyiV6giy9f3ixmVSU3sGmyDpxGVjecUtxvbtbtAye2mvfvBxcZ9pY7aIQ-QxWIPB8TA/exec",
+    MAX_RETRIES: 3,
+    STORAGE_KEY: "recorder_app_state"
+};
+
+// ==========================================
+// 🏗 現場監督の設計図（クラス）
+// ==========================================
 class RecorderController {
-    constructor(gasUrl) {
-        // バックエンド（GAS）のWebアプリURLをここに設定します
-        this.gasUrl = gasUrl;
-        
-        // ① お財布ガード：1つのパーツにつき最大3回までしかリトライしない
-        this.MAX_RETRIES = 3;
-        
-        // LocalStorageに保存するためのキー名
-        this.STORAGE_KEY = 'recorder_app_state';
-        
-        // 現在の進捗状態（記憶）を呼び出す
+    constructor(config) {
+        this.gasUrl = config.GAS_URL;
+        this.maxRetries = config.MAX_RETRIES;
+        this.storageKey = config.STORAGE_KEY;
         this.state = this.loadState() || this.createInitialState();
     }
 
-    // ==========================================
-    // 部署1: 記憶・進捗管理担当 (State Manager)
-    // ==========================================
-    
-    // 初期状態の作成
+    // --- 部署1: 記憶・進捗管理担当 ---
     createInitialState() {
         return {
-            sessionId: Date.now().toString(), // 今回の録音の固有ID
-            mode: '3', // 処理モード（デフォルトは議事録まで）
-            chunks: [], // 分割された音声パーツのリスト
+            sessionId: Date.now().toString(),
+            mode: '3',
+            chunks: [],
             isCompleted: false
         };
     }
-
-    // 日記（LocalStorage）を保存
-    saveState() {
-        localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.state));
-    }
-
-    // 日記（LocalStorage）を読み込み
+    saveState() { localStorage.setItem(this.storageKey, JSON.stringify(this.state)); }
     loadState() {
-        const saved = localStorage.getItem(this.STORAGE_KEY);
+        const saved = localStorage.getItem(this.storageKey);
         return saved ? JSON.parse(saved) : null;
     }
-
-    // 処理がすべて終わったら日記を消去
     clearState() {
-        localStorage.removeItem(this.STORAGE_KEY);
+        localStorage.removeItem(this.storageKey);
         this.state = this.createInitialState();
     }
 
-
-    // ==========================================
-    // 部署2: 録音・スライス担当 (Audio Splitter)
-    // ==========================================
-    
-    // 10分ごとに切り分けられた音声データ（Blob）をリストに追加する
-    addAudioChunk(blob, index) {
+    // --- 部署2: 録音・スライス担当 ---
+    // ※今回はbase64データを受け取る想定にしています
+    addAudioChunk(base64Data, index) {
         this.state.chunks.push({
             id: index,
-            blob: blob, // ※実際にはBlobはStorageに保存できないため、File API等でDriveに上げたURLを保持するのが理想です
-            status: 'pending', // pending(未送信), processing(処理中), completed(完了), error(エラー)
-            text: '', // 文字起こしされたテキストが入る箱
+            base64Data: base64Data, 
+            status: 'pending',
+            text: '',
             retryCount: 0
         });
         this.saveState();
     }
 
-
-    // ==========================================
-    // 部署3: 通信・リトライ担当 (Network & Retry)
-    // ==========================================
-
-    // すべてのパーツを一斉に並列送信する（よーいドン！）
-    async processAllChunks(onProgressCallback) {
+    // --- 部署3: 通信・リトライ担当 ---
+    async processAllChunks(meetingName, templateType, onProgressCallback) {
         console.log("🚀 並列処理を開始します...");
-
-        // まだ完了していない（未送信 or エラー）パーツだけを抽出
         const pendingChunks = this.state.chunks.filter(c => c.status !== 'completed');
 
-        // Promise.all を使って一斉に送信（並列処理）
+        // 一斉送信（並列処理）
         const promises = pendingChunks.map(chunk => 
             this.sendChunkWithRetry(chunk, onProgressCallback)
         );
-
-        // すべての並列処理が終わるまで待つ
         await Promise.all(promises);
 
-        // 全パーツが完了したかチェック
         const allCompleted = this.state.chunks.every(c => c.status === 'completed');
         if (allCompleted) {
             console.log("🎉 すべての文字起こしが完了しました！");
-            return await this.mergeAndCreateMinutes();
+            return await this.mergeAndCreateMinutes(meetingName, templateType);
         } else {
             throw new Error("一部の処理がエラーで停止しました。手動再開をお願いします。");
         }
     }
 
-    // 1つのパーツをGASに送信 ＆ 失敗したら自動リトライ（指数バックオフ）
     async sendChunkWithRetry(chunk, onProgressCallback) {
         chunk.status = 'processing';
         this.saveState();
         if(onProgressCallback) onProgressCallback(this.state.chunks);
 
-        while (chunk.retryCount <= this.MAX_RETRIES) {
+        while (chunk.retryCount <= this.maxRetries) {
             try {
-                // 待機時間（指数バックオフ: 0秒 → 2秒 → 4秒 → 8秒）
                 const waitTime = chunk.retryCount === 0 ? 0 : Math.pow(2, chunk.retryCount) * 1000;
                 if (waitTime > 0) {
-                    console.warn(`⚠️ パーツ${chunk.id}: APIビジーのため ${waitTime/1000}秒待機して再送します...`);
-                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                    console.warn(`⚠️ パーツ${chunk.id}: ${waitTime/1000}秒待機して再送します...`);
+                    await new Promise(res => setTimeout(res, waitTime));
                 }
 
-                // --- 🔴 ここでGASへ送信（Fetch API） ---
-                // ※現在はダミー通信。後ほど GAS側の仕様に合わせて連携コードを書きます
-                const responseText = await this.mockGasApiCall(chunk);
+                // 🔴 GASへ本物のデータ送信（文字起こし依頼）
+                const payload = {
+                    action: "transcribe",
+                    fileName: `chunk_${this.state.sessionId}_${chunk.id}`,
+                    audioData: chunk.base64Data
+                };
                 
-                // 成功したら記録してループを抜ける
+                const response = await this.callGasApi(payload);
+                
                 chunk.status = 'completed';
-                chunk.text = responseText;
+                chunk.text = response.text; // GASから返ってきたテキストを保存
                 this.saveState();
                 if(onProgressCallback) onProgressCallback(this.state.chunks);
                 return true;
 
             } catch (error) {
                 chunk.retryCount++;
-                console.error(`❌ パーツ${chunk.id}: エラー発生 (${chunk.retryCount}回目)`);
+                console.error(`❌ パーツ${chunk.id}: エラー (${chunk.retryCount}回目)`, error);
                 
-                if (chunk.retryCount > this.MAX_RETRIES) {
-                    // 最大リトライ回数を超えたら「エラー」として諦める（お財布ガード）
+                if (chunk.retryCount > this.maxRetries) {
                     chunk.status = 'error';
                     this.saveState();
                     if(onProgressCallback) onProgressCallback(this.state.chunks);
@@ -136,41 +117,54 @@ class RecorderController {
         }
     }
 
-    // GAS通信のダミー（テスト用）
-    async mockGasApiCall(chunk) {
-        return new Promise((resolve, reject) => {
-            const isSuccess = Math.random() > 0.2; // 20%の確率で一時エラーが起きるテスト
-            setTimeout(() => {
-                if (isSuccess) resolve(`[パーツ${chunk.id}の文字起こし結果]`);
-                else reject(new Error("API Busy"));
-            }, 2000 + Math.random() * 2000);
+    // 🔴 GAS通信の共通処理（ここで実際にインターネット越しにGASを叩きます）
+    async callGasApi(payload) {
+        const response = await fetch(this.gasUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' }, // GASのdoPostでCORSエラーを防ぐためtext/plainを指定
+            body: JSON.stringify(payload)
         });
+        
+        const data = await response.json();
+        if (!data.success) {
+            throw new Error(data.error || "GAS側で不明なエラーが発生しました");
+        }
+        return data.data; // 成功したデータの中身だけを返す
     }
 
 
-    // ==========================================
-    // 部署4: 結合・総仕上げ担当 (Text Stitcher)
-    // ==========================================
-
-    async mergeAndCreateMinutes() {
+    // --- 部署4: 結合・総仕上げ担当 ---
+    async mergeAndCreateMinutes(meetingName, templateType) {
         console.log("🔗 テキストの結合を開始します...");
-
-        // 必ず「id（背番号）順」に並び替えてからテキストを結合する
         const sortedChunks = [...this.state.chunks].sort((a, b) => a.id - b.id);
-        
-        // のりしろ（重複）を考慮して綺麗に繋ぐ処理（ここでは一旦単純結合）
         const fullTranscript = sortedChunks.map(c => c.text).join('\n\n');
 
-        console.log("✅ 全文テキスト完成:\n", fullTranscript);
+        let resultData = { transcript: fullTranscript, documentUrl: null };
 
-        // Step 3 (議事録化) へ進む
+        // Step 3 (議事録化) の処理
         if (this.state.mode === '3') {
             console.log("📝 議事録化プロンプトと一緒にGASへ最終送信します...");
-            // TODO: ここでGAS(3.5 Flash)を呼び出す処理を書く
+            
+            const payload = {
+                action: "generateMinutes",
+                text: fullTranscript,
+                meetingName: meetingName || "無題の会議",
+                templateType: templateType || "汎用議事録"
+            };
+
+            const response = await this.callGasApi(payload);
+            resultData.documentUrl = response.documentUrl;
+            console.log("✅ 議事録ドキュメント完成: ", response.documentUrl);
         }
 
-        // 全て終わったら日記を消す
+        // 処理完了後、日記を消去
         this.clearState();
-        return fullTranscript;
+        return resultData;
     }
 }
+
+// ==========================================
+// 🚀 現場監督の出勤（インスタンス化）
+// ==========================================
+// グローバル変数として appController を作成し、HTML側から操作できるようにする
+window.appController = new RecorderController(CONFIG);
