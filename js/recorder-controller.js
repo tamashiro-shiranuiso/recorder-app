@@ -1,6 +1,8 @@
 /**
  * レコーザーアプリ ミドルエンド（現場監督）
  * 役割：録音データの管理、進捗の記憶、GASへの並列送信＆自動リトライ、最終結合
+ *
+ * 🛠 修正版：processAllChunks / mergeAndCreateMinutes の多重起動防止ガードを追加
  */
 
 const CONFIG = {
@@ -15,6 +17,10 @@ class RecorderController {
         this.maxRetries = config.MAX_RETRIES;
         this.storageKey = config.STORAGE_KEY;
         this.state = this.loadState() || this.createInitialState();
+
+        // 🌟 追加：多重起動防止フラグ
+        this.isProcessing = false;
+        this.hasFinalized = false; // このセッションで最終結合が完了済みかどうか
     }
 
     // --- 部署1: 記憶・進捗管理担当 ---
@@ -49,10 +55,18 @@ class RecorderController {
     clearState() {
         localStorage.removeItem(this.storageKey);
         this.state = this.createInitialState();
+        this.hasFinalized = false;
     }
 
     // --- 部署2: 録音・スライス担当 ---
     addAudioChunk(base64Data, index, mimeType, meetingName) {
+        // 🌟 追加：最終処理が既に完了/実行中のセッションに対する追加チャンクは無視する
+        // （onstopの発火遅延で、確定後に紛れ込んでくるケースの保険）
+        if (this.hasFinalized) {
+            console.warn(`⚠️ addAudioChunk: セッション確定後のチャンク(${index})を検知、破棄します。`);
+            return;
+        }
+
         this.state.chunks.push({
             id: index,
             base64Data: base64Data, 
@@ -67,26 +81,41 @@ class RecorderController {
 
     // --- 部署3: 通信・リトライ担当 ---
     async processAllChunks(meetingName, templateType, fullAudioBase64, onProgressCallback) {
-        console.log("🚀 並列処理を開始します...");
-        const pendingChunks = this.state.chunks.filter(c => c.status !== 'completed');
+        // 🌟 追加：多重起動ガード（同一セッションで二度と処理させない）
+        if (this.isProcessing) {
+            console.warn("⚠️ processAllChunks: 既に処理中のため、この呼び出しは無視します。");
+            return null;
+        }
+        if (this.hasFinalized) {
+            console.warn("⚠️ processAllChunks: このセッションは既に確定済みのため、この呼び出しは無視します。");
+            return null;
+        }
+        this.isProcessing = true;
 
-        pendingChunks.forEach(chunk => {
-            if (!chunk.meetingName) chunk.meetingName = meetingName || "無題の会議";
-        });
+        try {
+            console.log("🚀 並列処理を開始します...", "chunks数:", this.state.chunks.length);
+            const pendingChunks = this.state.chunks.filter(c => c.status !== 'completed');
 
-        // 🌟 途中パーツの送信（GAS側ではこの段階では保存せず、AI文字起こしだけ行います）
-        const promises = pendingChunks.map(chunk => 
-            this.sendChunkWithRetry(chunk, onProgressCallback)
-        );
-        await Promise.all(promises);
+            pendingChunks.forEach(chunk => {
+                if (!chunk.meetingName) chunk.meetingName = meetingName || "無題の会議";
+            });
 
-        const allCompleted = this.state.chunks.every(c => c.status === 'completed');
-        if (allCompleted) {
-            console.log("🎉 すべての文字起こしが完了しました！");
-            // 🌟 最終結合処理へ全体音声データを引き渡す
-            return await this.mergeAndCreateMinutes(meetingName, templateType, fullAudioBase64);
-        } else {
-            throw new Error("一部の処理がエラーで停止しました。手動再開をお願いします。");
+            // 🌟 途中パーツの送信（GAS側ではこの段階では保存せず、AI文字起こしだけ行います）
+            const promises = pendingChunks.map(chunk => 
+                this.sendChunkWithRetry(chunk, onProgressCallback)
+            );
+            await Promise.all(promises);
+
+            const allCompleted = this.state.chunks.every(c => c.status === 'completed');
+            if (allCompleted) {
+                console.log("🎉 すべての文字起こしが完了しました！");
+                // 🌟 最終結合処理へ全体音声データを引き渡す
+                return await this.mergeAndCreateMinutes(meetingName, templateType, fullAudioBase64);
+            } else {
+                throw new Error("一部の処理がエラーで停止しました。手動再開をお願いします。");
+            }
+        } finally {
+            this.isProcessing = false;
         }
     }
 
@@ -151,7 +180,14 @@ class RecorderController {
 
     // --- 部署4: 結合・総仕上げ担当 ---
     async mergeAndCreateMinutes(meetingName, templateType, fullAudioBase64) {
-        console.log("🔗 テキストの結合を開始します...");
+        // 🌟 追加：最終結合が既に実行済みなら二度と実行しない
+        if (this.hasFinalized) {
+            console.warn("⚠️ mergeAndCreateMinutes: 既に確定済みのため、この呼び出しは無視します。");
+            return null;
+        }
+        this.hasFinalized = true; // 🌟 GAS呼び出し前に確定フラグを立てる（await中の再入も防ぐ）
+
+        console.log("🔗 テキストの結合を開始します...", new Date().toISOString());
         const sortedChunks = [...this.state.chunks].sort((a, b) => a.id - b.id);
         const fullTranscript = sortedChunks.map(c => c.text).join('\n\n');
 
@@ -170,13 +206,20 @@ class RecorderController {
             mimeType: sortedChunks[0]?.mimeType || 'audio/webm'
         };
 
-        const response = await this.callGasApi(payload);
-        resultData.documentUrl = response.documentUrl;
-        resultData.transcriptUrl = response.transcriptUrl;
-        console.log("✅ 最終処理完了: ", response);
+        try {
+            const response = await this.callGasApi(payload);
+            resultData.documentUrl = response.documentUrl;
+            resultData.transcriptUrl = response.transcriptUrl;
+            console.log("✅ 最終処理完了: ", response);
 
-        this.clearState();
-        return resultData;
+            this.clearState();
+            return resultData;
+        } catch (err) {
+            // 🌟 GAS呼び出しが失敗した場合、hasFinalizedを戻して手動再開を可能にする
+            console.error("❌ 最終処理でエラー発生。再試行できるようフラグを戻します。", err);
+            this.hasFinalized = false;
+            throw err;
+        }
     }
 }
 
