@@ -124,7 +124,7 @@
         }
 
         /* ==========================================
-           🎨 進捗表示 ＆ リカバリーパネル
+           🎨 進捗表示 ＆ パネル群
            ========================================== */
         .progress-container {
             display: none; background-color: #f8f9fa; padding: 24px;
@@ -152,14 +152,18 @@
             background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(10px);
             border: 1px solid rgba(0, 0, 0, 0.05); border-radius: 20px;
         }
-        .recovery-panel h4 { margin: 0 0 10px 0; color: #fab005; font-size: 15px; }
+        .recovery-panel h4 { margin: 0 0 10px 0; font-size: 15px; }
+        .recovery-panel.help h4 { color: #fab005; }
+        .recovery-panel.settings h4 { color: #4dabf7; }
+        
         .recovery-btn {
             width: 100%; padding: 14px; margin-top: 10px;
             background-color: #fff; border: 2px solid #f1f3f5;
             border-radius: 12px; font-weight: bold; color: #495057;
             cursor: pointer; transition: all 0.2s;
         }
-        .recovery-btn:hover { border-color: #fab005; color: #fab005; }
+        .recovery-panel.help .recovery-btn:hover { border-color: #fab005; color: #fab005; }
+        .recovery-panel.settings .recovery-btn:hover { border-color: #4dabf7; color: #4dabf7; background: #e7f5ff; }
         
         .fade-in { animation: fadeIn 0.4s ease forwards; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
@@ -174,13 +178,12 @@
             <button class="btn-pill" title="手動で途中から再開する" id="showRecoveryBtn">
                 <span>🛠</span> 手動再開
             </button>
-            <button class="btn-icon" title="設定">⚙️</button>
+            <button class="btn-icon" title="設定" id="settingsBtn">⚙️</button>
         </div>
     </div>
 
     <div class="input-group">
         <label>会議名・内容 (ファイル名)</label>
-        <!-- 💡 変更点: IDを追加しました -->
         <input type="text" id="meetingNameInput" placeholder="例：〇〇様 担当者会議">
     </div>
 
@@ -195,7 +198,6 @@
 
     <div class="input-group fade-in" id="templateGroup">
         <label>議事録テンプレート</label>
-        <!-- 💡 変更点: IDとvalueを追加しました -->
         <select id="templateSelect">
             <option value="汎用議事録">汎用議事録</option>
             <option value="サービス担当者会議録">サービス担当者会議録</option>
@@ -213,10 +215,21 @@
         <div class="dots-grid" id="dotsGrid"></div>
     </div>
 
-    <div class="recovery-panel" id="recoveryPanel">
+    <!-- お助けモード（手動再開）パネル -->
+    <div class="recovery-panel help" id="recoveryPanel">
         <h4>🛠 お助けモード（手動再開）</h4>
         <input type="text" placeholder="Googleドライブの音声リンクを貼る">
         <button class="recovery-btn">この音声から文字起こしを再開</button>
+    </div>
+
+    <!-- 🌟 追加：システム設定パネル -->
+    <div class="recovery-panel settings" id="settingsPanel">
+        <h4>⚙️ システム設定</h4>
+        <div class="input-group" style="margin-bottom: 0;">
+            <label style="font-size: 12px;">GAS ウェブアプリURL</label>
+            <input type="text" id="gasUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
+            <button class="recovery-btn" id="saveSettingsBtn">設定を保存して閉じる</button>
+        </div>
     </div>
 </div>
 
@@ -225,19 +238,20 @@
 
 <script>
     // ==========================================
-    // 🔧 設定と状態管理（保守性のためのリファクタリング）
+    // 🔧 設定と状態管理
     // ==========================================
-        const APP_CONFIG = {
-        // CHUNK_INTERVAL_MS: 600000 // ←本番用（10分）
-        CHUNK_INTERVAL_MS: 10000    // ←テスト用（10秒）に変更！
+    const APP_CONFIG = {
+        // テスト用に10秒に設定しています。本番は 600000 に変更してください。
+        CHUNK_INTERVAL_MS: 10000 
     };
+    
     const AppState = {
         isRecording: false,
         mediaRecorder: null,
         currentChunkIndex: 0
     };
 
-    // 画面上の部品（UI要素）をすべてここにまとめる
+    // 画面上の部品（UI要素）
     const UI = {
         modeSelect: document.getElementById('modeSelect'),
         templateGroup: document.getElementById('templateGroup'),
@@ -248,19 +262,23 @@
         progressContainer: document.getElementById('progressContainer'),
         dotsGrid: document.getElementById('dotsGrid'),
         progressTitle: document.getElementById('progressTitle'),
+        
+        // パネル群
         showRecoveryBtn: document.getElementById('showRecoveryBtn'),
-        recoveryPanel: document.getElementById('recoveryPanel')
+        recoveryPanel: document.getElementById('recoveryPanel'),
+        settingsBtn: document.getElementById('settingsBtn'),
+        settingsPanel: document.getElementById('settingsPanel'),
+        gasUrlInput: document.getElementById('gasUrlInput'),
+        saveSettingsBtn: document.getElementById('saveSettingsBtn')
     };
 
-
     // ==========================================
-    // 💡 イベントの紐付け（初期化）
+    // 💡 イベントの紐付け
     // ==========================================
     function bindEvents() {
         // モード切替のUI制御
         UI.modeSelect.addEventListener('change', (e) => {
             if (window.appController) window.appController.state.mode = e.target.value;
-            
             if (e.target.value === "3") {
                 UI.templateGroup.style.display = "block";
                 UI.templateGroup.classList.add('fade-in');
@@ -269,21 +287,54 @@
             }
         });
 
-        // リカバリーパネルの開閉
+        // お助けパネルの開閉
         UI.showRecoveryBtn.addEventListener('click', () => {
             UI.recoveryPanel.style.display = UI.recoveryPanel.style.display === 'block' ? 'none' : 'block';
-            if(UI.recoveryPanel.style.display === 'block') UI.recoveryPanel.classList.add('fade-in');
+            if(UI.recoveryPanel.style.display === 'block') {
+                UI.recoveryPanel.classList.add('fade-in');
+                UI.settingsPanel.style.display = 'none'; // もう片方は閉じる
+            }
         });
 
-        // 巨大な主役ボタン（マイク）のクリック
+        // ⚙️ 設定パネルの開閉
+        UI.settingsBtn.addEventListener('click', () => {
+            UI.settingsPanel.style.display = UI.settingsPanel.style.display === 'block' ? 'none' : 'block';
+            if(UI.settingsPanel.style.display === 'block') {
+                UI.settingsPanel.classList.add('fade-in');
+                UI.recoveryPanel.style.display = 'none'; // もう片方は閉じる
+                // 現在保存されているURLを入力欄にセット
+                UI.gasUrlInput.value = window.appController ? window.appController.gasUrl : "";
+            }
+        });
+
+        // 設定の保存ボタン
+        UI.saveSettingsBtn.addEventListener('click', () => {
+            const url = UI.gasUrlInput.value.trim();
+            if(url) {
+                localStorage.setItem('saved_gas_url', url); // ブラウザに記憶
+                if(window.appController) window.appController.gasUrl = url; // 現場監督に伝える
+                alert("設定を保存しました！");
+                UI.settingsPanel.style.display = 'none';
+            } else {
+                alert("URLを入力してください。");
+            }
+        });
+
+        // 主役ボタン（マイク）のクリック
         UI.mainRecordBtn.addEventListener('click', handleRecordButtonClick);
     }
-
 
     // ==========================================
     // 🎤 録音・通信のメインロジック
     // ==========================================
     async function handleRecordButtonClick() {
+        // 🌟 ガード処理：GASのURLが設定されていない場合は録音させない
+        if (!window.appController || !window.appController.gasUrl) {
+            alert("初回設定が必要です！\n右上の「⚙️設定」ボタンから、GASウェブアプリのURLを登録してください。");
+            if(UI.settingsPanel.style.display !== 'block') UI.settingsBtn.click();
+            return;
+        }
+
         if (!AppState.isRecording) {
             await startRecording();
         } else {
@@ -293,16 +344,13 @@
 
     async function startRecording() {
         try {
-            // マイクのアクセス許可を求める
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             AppState.mediaRecorder = new MediaRecorder(stream);
             AppState.currentChunkIndex = 0;
             
-            // UIと記憶の初期化
             UI.dotsGrid.innerHTML = '';
             if (window.appController) window.appController.state.chunks = [];
 
-            // 録音中の見た目に変更
             AppState.isRecording = true;
             UI.mainRecordBtn.classList.add('recording');
             UI.mainRecordBtn.innerHTML = "⏹";
@@ -310,13 +358,11 @@
             UI.statusText.style.color = "#fa5252";
             UI.progressContainer.style.display = "none";
 
-            // 指定時間ごとにデータが切り出された時の処理
             AppState.mediaRecorder.ondataavailable = async (e) => {
                 if (e.data.size > 0 && window.appController) {
                     const base64 = await blobToBase64(e.data);
                     window.appController.addAudioChunk(base64, AppState.currentChunkIndex);
                     
-                    // UIに新しい進捗たまご（ドット）を追加
                     const dot = document.createElement('div');
                     dot.className = 'dot';
                     dot.id = `dot-${AppState.currentChunkIndex}`;
@@ -326,7 +372,6 @@
                 }
             };
 
-            // 録音スタート（設定した間隔で自動カット）
             AppState.mediaRecorder.start(APP_CONFIG.CHUNK_INTERVAL_MS); 
 
         } catch (err) {
@@ -338,10 +383,8 @@
     async function stopRecordingAndProcess() {
         AppState.isRecording = false;
         AppState.mediaRecorder.stop();
-        // マイクの赤いランプ（ストリーム）を安全に消灯する
         AppState.mediaRecorder.stream.getTracks().forEach(track => track.stop());
 
-        // 処理中の見た目に変更
         UI.mainRecordBtn.classList.remove('recording');
         UI.mainRecordBtn.innerHTML = "🎤";
         UI.mainRecordBtn.style.display = "none";
@@ -350,7 +393,6 @@
         UI.progressContainer.style.display = "block";
         UI.progressTitle.innerHTML = "AIが音声を処理中...";
         
-        // 最後の音声パーツが切り出されるのを少し待ってからGASへ送信開始
         setTimeout(async () => {
             try {
                 if (!window.appController) throw new Error("現場監督のプログラムが読み込まれていません。");
@@ -358,14 +400,12 @@
                 const meetingName = UI.meetingNameInput.value || "無題の会議";
                 const templateType = UI.templateSelect.value;
                 
-                // 🚀 現場監督に並列処理のスタートを指示
                 const result = await window.appController.processAllChunks(
                     meetingName, 
                     templateType, 
                     updateProgressUI
                 );
                 
-                // 🎉 完了時の見た目に変更
                 UI.progressTitle.innerHTML = "🎉 処理が完了しました！";
                 UI.statusText.innerHTML = "タップして新しい録音を開始";
                 UI.statusText.style.color = "#868e96";
@@ -387,10 +427,8 @@
     }
 
     // ==========================================
-    // 🛠 補助ツール群
+    // 🛠 補助ツール
     // ==========================================
-    
-    // Blob（バイナリ）をBase64（文字列）に変換する関数
     function blobToBase64(blob) {
         return new Promise((resolve, _) => {
             const reader = new FileReader();
@@ -399,12 +437,11 @@
         });
     }
 
-    // 現場監督からの指示でドットの色を更新する関数
     function updateProgressUI(chunks) {
         chunks.forEach(chunk => {
             const dot = document.getElementById(`dot-${chunk.id}`);
             if (dot) {
-                dot.className = 'dot'; // クラスをリセット
+                dot.className = 'dot';
                 if (chunk.status === 'processing') dot.classList.add('processing');
                 else if (chunk.status === 'completed') dot.classList.add('complete');
                 else if (chunk.status === 'error') dot.classList.add('error');
@@ -412,7 +449,7 @@
         });
     }
 
-    // イベントの起動
+    // アプリ初期化
     bindEvents();
 </script>
 </body>
