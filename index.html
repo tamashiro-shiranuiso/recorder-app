@@ -76,7 +76,7 @@
         .btn-pill:hover { border-color: #fab005; color: #fab005; background: #fff9db; }
 
         /* ==========================================
-           🎨 入力フォーム ＆ 小さなマイクボタン
+           🎨 入力フォーム ＆ 音声入力ボタン
            ========================================== */
         .input-group { margin-bottom: 20px; }
         .input-group label {
@@ -91,14 +91,13 @@
             border-color: #74c0fc; background-color: #ffffff; box-shadow: 0 0 0 4px rgba(116, 192, 252, 0.15);
         }
 
-        /* 🌟 入力欄の中のマイクボタン用スタイル */
         .input-with-icon {
             position: relative;
             display: flex;
             align-items: center;
         }
         .input-with-icon input {
-            padding-right: 50px; /* マイクボタンのスペースを確保 */
+            padding-right: 50px;
         }
         .mini-mic-btn {
             position: absolute;
@@ -222,7 +221,6 @@
 
     <div class="input-group">
         <label>会議名・内容 (ファイル名)</label>
-        <!-- 🌟 会議名入力欄とマイクボタンをグループ化 -->
         <div class="input-with-icon">
             <input type="text" id="meetingNameInput" placeholder="例：〇〇様 担当者会議">
             <button class="mini-mic-btn" id="meetingNameMicBtn" title="音声で入力">🎙️</button>
@@ -275,7 +273,6 @@
     </div>
 </div>
 
-<!-- 現場監督（ミドルエンド）のプログラムを読み込む -->
 <script src="js/recorder-controller.js"></script>
 
 <script>
@@ -283,7 +280,7 @@
     // 🔧 設定と状態管理
     // ==========================================
     const APP_CONFIG = {
-        CHUNK_INTERVAL_MS: 10000 // テスト用（本番は 600000）
+        CHUNK_INTERVAL_MS: 10000 // テスト用10秒（本番は 600000）
     };
     
     const AppState = {
@@ -292,12 +289,11 @@
         currentChunkIndex: 0
     };
 
-    // 画面上の部品（UI要素）
     const UI = {
         modeSelect: document.getElementById('modeSelect'),
         templateGroup: document.getElementById('templateGroup'),
         meetingNameInput: document.getElementById('meetingNameInput'),
-        meetingNameMicBtn: document.getElementById('meetingNameMicBtn'), // 🌟 追加：小さいマイクボタン
+        meetingNameMicBtn: document.getElementById('meetingNameMicBtn'),
         templateSelect: document.getElementById('templateSelect'),
         mainRecordBtn: document.getElementById('mainRecordBtn'),
         statusText: document.getElementById('statusText'),
@@ -316,7 +312,7 @@
     // 💡 イベントの紐付け
     // ==========================================
     function bindEvents() {
-        // 🌟 会議名の音声入力（Web Speech API）
+        // 会議名の音声入力
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
             const recognition = new SpeechRecognition();
@@ -324,41 +320,29 @@
             recognition.interimResults = false;
             recognition.continuous = false;
 
-            // マイクボタンを押した時
-            UI.meetingNameMicBtn.addEventListener('click', () => {
-                recognition.start();
-            });
+            UI.meetingNameMicBtn.addEventListener('click', () => recognition.start());
 
-            // 録音開始時（見た目を赤くする）
             recognition.onstart = () => {
                 UI.meetingNameMicBtn.classList.add('listening');
                 UI.meetingNameInput.placeholder = "お話しください...";
-                UI.meetingNameInput.value = ""; // 入力をクリア
+                UI.meetingNameInput.value = "";
             };
 
-            // 音声がテキストに変換された時
             recognition.onresult = (event) => {
                 const transcript = event.results[0][0].transcript;
-                // 末尾の句点（。や空白）を綺麗に除去してセット
                 UI.meetingNameInput.value = transcript.replace(/[。、.\s]+$/, '');
             };
 
-            // 録音終了時（見た目を元に戻す）
             recognition.onend = () => {
                 UI.meetingNameMicBtn.classList.remove('listening');
                 UI.meetingNameInput.placeholder = "例：〇〇様 担当者会議";
             };
 
-            // エラー時
-            recognition.onerror = (event) => {
+            recognition.onerror = () => {
                 UI.meetingNameMicBtn.classList.remove('listening');
                 UI.meetingNameInput.placeholder = "例：〇〇様 担当者会議";
-                if(event.error !== 'no-speech') {
-                    console.warn("音声入力エラー:", event.error);
-                }
             };
         } else {
-            // ブラウザが音声入力に非対応の場合はボタンを隠す
             UI.meetingNameMicBtn.style.display = 'none';
         }
 
@@ -373,7 +357,7 @@
             }
         });
 
-        // お助けパネルの開閉
+        // パネル制御
         UI.showRecoveryBtn.addEventListener('click', () => {
             UI.recoveryPanel.style.display = UI.recoveryPanel.style.display === 'block' ? 'none' : 'block';
             if(UI.recoveryPanel.style.display === 'block') {
@@ -382,7 +366,6 @@
             }
         });
 
-        // ⚙️ 設定パネルの開閉
         UI.settingsBtn.addEventListener('click', () => {
             UI.settingsPanel.style.display = UI.settingsPanel.style.display === 'block' ? 'none' : 'block';
             if(UI.settingsPanel.style.display === 'block') {
@@ -392,7 +375,6 @@
             }
         });
 
-        // 設定の保存ボタン
         UI.saveSettingsBtn.addEventListener('click', () => {
             const url = UI.gasUrlInput.value.trim();
             if(url) {
@@ -405,7 +387,6 @@
             }
         });
 
-        // 主役ボタン（マイク）のクリック
         UI.mainRecordBtn.addEventListener('click', handleRecordButtonClick);
     }
 
@@ -429,7 +410,20 @@
     async function startRecording() {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            AppState.mediaRecorder = new MediaRecorder(stream);
+            
+            // 🌟 端末依存の吸収：ブラウザが対応しているMIMEタイプを自動判別
+            let options = {};
+            let mimeType = 'audio/webm'; // デフォルト(Android/Chrome/PC)
+            
+            if (MediaRecorder.isTypeSupported('audio/webm')) {
+                options = { mimeType: 'audio/webm' };
+                mimeType = 'audio/webm';
+            } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+                options = { mimeType: 'audio/mp4' }; // iPhone / Safari用
+                mimeType = 'audio/mp4';
+            }
+
+            AppState.mediaRecorder = new MediaRecorder(stream, options);
             AppState.currentChunkIndex = 0;
             
             UI.dotsGrid.innerHTML = '';
@@ -445,7 +439,8 @@
             AppState.mediaRecorder.ondataavailable = async (e) => {
                 if (e.data.size > 0 && window.appController) {
                     const base64 = await blobToBase64(e.data);
-                    window.appController.addAudioChunk(base64, AppState.currentChunkIndex);
+                    // 🌟 現場監督に音声データと一緒に自動検知したMIMEタイプを渡す
+                    window.appController.addAudioChunk(base64, AppState.currentChunkIndex, mimeType);
                     
                     const dot = document.createElement('div');
                     dot.className = 'dot';
@@ -510,9 +505,6 @@
         }, 1000);
     }
 
-    // ==========================================
-    // 🛠 補助ツール
-    // ==========================================
     function blobToBase64(blob) {
         return new Promise((resolve, _) => {
             const reader = new FileReader();
@@ -533,7 +525,6 @@
         });
     }
 
-    // アプリ初期化
     bindEvents();
 </script>
 </body>
