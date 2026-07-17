@@ -1,8 +1,12 @@
 /**
  * レコーザーアプリ ミドルエンド（現場監督）
- * 役割：録音データの管理、進捗の記憶、GASへの並列送信＆自動リトライ、最終結合
+ * 役割：録音データの管理、進捗の記憶、GASへの並列送信＆自動リトライ、最終確定
  *
- * 🛠 修正版：processAllChunks / mergeAndCreateMinutes の多重起動防止ガードを追加
+ * 🛠 方式B対応版：
+ * ・音声本体は録音中に GAS へ随時「追記保存（appendAudioChunk）」される前提に変更。
+ *   そのため停止時に巨大な音声Blobをまるごと送る必要がなくなった。
+ * ・文字起こし用のチャンクは従来通り transcribe アクションで個別に送信する。
+ * ・addTranscribeChunk / appendAudioChunk のように役割を分離した。
  */
 
 const CONFIG = {
@@ -18,9 +22,13 @@ class RecorderController {
         this.storageKey = config.STORAGE_KEY;
         this.state = this.loadState() || this.createInitialState();
 
-        // 🌟 追加：多重起動防止フラグ
+        // 多重起動防止フラグ
         this.isProcessing = false;
-        this.hasFinalized = false; // このセッションで最終結合が完了済みかどうか
+        this.hasFinalized = false;
+
+        // 🌟 追加：音声の追記保存（appendAudioChunk）は失敗しても録音自体は止めない。
+        //   ただし失敗した断片は記録しておき、最後に警告できるようにする。
+        this.audioAppendFailures = [];
     }
 
     // --- 部署1: 記憶・進捗管理担当 ---
@@ -28,7 +36,7 @@ class RecorderController {
         return {
             sessionId: Date.now().toString(),
             mode: '3',
-            chunks: [],
+            chunks: [],       // 文字起こし用チャンク
             isCompleted: false
         };
     }
@@ -56,14 +64,23 @@ class RecorderController {
         localStorage.removeItem(this.storageKey);
         this.state = this.createInitialState();
         this.hasFinalized = false;
+        this.audioAppendFailures = [];
     }
 
-    // --- 部署2: 録音・スライス担当 ---
-    addAudioChunk(base64Data, index, mimeType, meetingName) {
-        // 🌟 追加：最終処理が既に完了/実行中のセッションに対する追加チャンクは無視する
-        // （onstopの発火遅延で、確定後に紛れ込んでくるケースの保険）
+    // 🌟 追加：新しい録音セッションを開始する際に呼ぶ（sessionIdを確定させる）
+    startNewSession() {
+        this.state = this.createInitialState();
+        this.hasFinalized = false;
+        this.isProcessing = false;
+        this.audioAppendFailures = [];
+        this.saveState();
+        return this.state.sessionId;
+    }
+
+    // --- 部署2: 文字起こし用チャンクの記録担当 ---
+    addTranscribeChunk(base64Data, index, mimeType, meetingName) {
         if (this.hasFinalized) {
-            console.warn(`⚠️ addAudioChunk: セッション確定後のチャンク(${index})を検知、破棄します。`);
+            console.warn(`⚠️ addTranscribeChunk: セッション確定後のチャンク(${index})を検知、破棄します。`);
             return;
         }
 
@@ -79,9 +96,45 @@ class RecorderController {
         this.saveState();
     }
 
-    // --- 部署3: 通信・リトライ担当 ---
-    async processAllChunks(meetingName, templateType, fullAudioBase64, onProgressCallback) {
-        // 🌟 追加：多重起動ガード（同一セッションで二度と処理させない）
+    // --- 部署2': 音声本体の追記保存担当（方式B・新設） ---
+    // timeslice方式で録音中に定期的に出てくる音声断片を、GASの一時ファイルへ随時送信する。
+    // これは「保存」であり「文字起こし」とは独立した処理のため、await不要でも呼べるが、
+    // 送信順序が結合順序に直結するため、呼び出し側は必ず順番を守って await すること。
+    async appendAudioChunk(base64Data, mimeType, meetingName, isFirstChunk) {
+        const payload = {
+            action: "appendAudioChunk",
+            sessionId: this.state.sessionId,
+            audioData: base64Data,
+            mimeType: mimeType || 'audio/webm',
+            meetingName: meetingName || "無題の会議",
+            isFirstChunk: !!isFirstChunk
+        };
+
+        // 🌟 音声保存はリトライしつつ行うが、失敗しても録音継続は妨げない
+        //   （文字起こしと違い、ここで例外を投げるとユーザーの録音操作自体が壊れるため）
+        let lastError = null;
+        for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+            try {
+                if (attempt > 0) {
+                    const waitTime = Math.pow(2, attempt) * 1000;
+                    console.warn(`⚠️ 音声追記保存: ${waitTime / 1000}秒待機して再送します...`);
+                    await new Promise(res => setTimeout(res, waitTime));
+                }
+                await this.callGasApi(payload);
+                return true;
+            } catch (error) {
+                lastError = error;
+                console.error(`❌ 音声追記保存エラー (${attempt + 1}回目)`, error);
+            }
+        }
+
+        // 🌟 全リトライ失敗 → 記録だけ残し、ユーザーには最終的に警告する
+        this.audioAppendFailures.push({ isFirstChunk, error: lastError ? lastError.message : "unknown" });
+        return false;
+    }
+
+    // --- 部署3: 文字起こしの通信・リトライ担当 ---
+    async processAllChunks(meetingName, templateType, onProgressCallback) {
         if (this.isProcessing) {
             console.warn("⚠️ processAllChunks: 既に処理中のため、この呼び出しは無視します。");
             return null;
@@ -93,14 +146,13 @@ class RecorderController {
         this.isProcessing = true;
 
         try {
-            console.log("🚀 並列処理を開始します...", "chunks数:", this.state.chunks.length);
+            console.log("🚀 文字起こし処理を開始します...", "chunks数:", this.state.chunks.length);
             const pendingChunks = this.state.chunks.filter(c => c.status !== 'completed');
 
             pendingChunks.forEach(chunk => {
                 if (!chunk.meetingName) chunk.meetingName = meetingName || "無題の会議";
             });
 
-            // 🌟 途中パーツの送信（GAS側ではこの段階では保存せず、AI文字起こしだけ行います）
             const promises = pendingChunks.map(chunk => 
                 this.sendChunkWithRetry(chunk, onProgressCallback)
             );
@@ -109,8 +161,7 @@ class RecorderController {
             const allCompleted = this.state.chunks.every(c => c.status === 'completed');
             if (allCompleted) {
                 console.log("🎉 すべての文字起こしが完了しました！");
-                // 🌟 最終結合処理へ全体音声データを引き渡す
-                return await this.mergeAndCreateMinutes(meetingName, templateType, fullAudioBase64);
+                return await this.finalizeSession(meetingName, templateType);
             } else {
                 throw new Error("一部の処理がエラーで停止しました。手動再開をお願いします。");
             }
@@ -178,31 +229,30 @@ class RecorderController {
         return data.data;
     }
 
-    // --- 部署4: 結合・総仕上げ担当 ---
-    async mergeAndCreateMinutes(meetingName, templateType, fullAudioBase64) {
-        // 🌟 追加：最終結合が既に実行済みなら二度と実行しない
+    // --- 部署4: 最終確定担当（方式B・簡素化） ---
+    // 🌟 音声本体は既に録音中にGAS側の一時ファイルへ保存済みのため、
+    //   ここでは「一時ファイルを正式なファイルとして確定させる」指示を送るだけでよい。
+    //   巨大な音声データを再送信する必要がない。
+    async finalizeSession(meetingName, templateType) {
         if (this.hasFinalized) {
-            console.warn("⚠️ mergeAndCreateMinutes: 既に確定済みのため、この呼び出しは無視します。");
+            console.warn("⚠️ finalizeSession: 既に確定済みのため、この呼び出しは無視します。");
             return null;
         }
-        this.hasFinalized = true; // 🌟 GAS呼び出し前に確定フラグを立てる（await中の再入も防ぐ）
+        this.hasFinalized = true;
 
-        console.log("🔗 テキストの結合を開始します...", new Date().toISOString());
+        console.log("🔗 文字起こしの結合と最終確定を開始します...", new Date().toISOString());
         const sortedChunks = [...this.state.chunks].sort((a, b) => a.id - b.id);
         const fullTranscript = sortedChunks.map(c => c.text).join('\n\n');
 
         let resultData = { transcript: fullTranscript, documentUrl: null, transcriptUrl: null };
 
-        // 🌟 モードに関わらず、最終音声ファイルの保存やドキュメント保存のために必ずGASを呼び出す
-        console.log("📝 最終処理をGASへ送信します...");
-        
         const payload = {
             action: "generateMinutes",
             text: fullTranscript,
             meetingName: meetingName || "無題の会議",
             templateType: templateType || "汎用議事録",
             mode: this.state.mode,
-            fullAudio: fullAudioBase64, // 🌟 統合された全体音声データをGASに届ける
+            sessionId: this.state.sessionId, // 🌟 一時ファイルを特定するためのキー
             mimeType: sortedChunks[0]?.mimeType || 'audio/webm'
         };
 
@@ -212,11 +262,15 @@ class RecorderController {
             resultData.transcriptUrl = response.transcriptUrl;
             console.log("✅ 最終処理完了: ", response);
 
+            if (this.audioAppendFailures.length > 0) {
+                console.warn("⚠️ 録音中に一部の音声追記保存が失敗していました。音声に欠損がある可能性があります。", this.audioAppendFailures);
+                resultData.audioWarning = true;
+            }
+
             this.clearState();
             return resultData;
         } catch (err) {
-            // 🌟 GAS呼び出しが失敗した場合、hasFinalizedを戻して手動再開を可能にする
-            console.error("❌ 最終処理でエラー発生。再試行できるようフラグを戻します。", err);
+            console.error("❌ 最終確定処理でエラー発生。再試行できるようフラグを戻します。", err);
             this.hasFinalized = false;
             throw err;
         }
