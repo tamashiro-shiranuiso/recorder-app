@@ -1,5 +1,5 @@
 /**
- * レコーダーアプリ ミドルエンド（現場監督）
+ * レコーザーアプリ ミドルエンド（現場監督）
  * 役割：録音データの管理、進捗の記憶、GASへの並列送信＆自動リトライ、最終結合
  */
 
@@ -29,7 +29,7 @@ class RecorderController {
 
     saveState() { 
         const cleanChunks = this.state.chunks.map(chunk => {
-            const { base64Data, ...rest } = chunk; // 容量オーバー回避のため音声データ除外
+            const { base64Data, ...rest } = chunk; // 容量オーバー回避のため音声データは除外
             return rest;
         });
         
@@ -57,7 +57,7 @@ class RecorderController {
             id: index,
             base64Data: base64Data, 
             mimeType: mimeType || 'audio/webm',
-            meetingName: meetingName || "無題の会議", // 🌟 会議名をパーツにも保存
+            meetingName: meetingName || "無題の会議",
             status: 'pending',
             text: '',
             retryCount: 0
@@ -66,15 +66,15 @@ class RecorderController {
     }
 
     // --- 部署3: 通信・リトライ担当 ---
-    async processAllChunks(meetingName, templateType, onProgressCallback) {
+    async processAllChunks(meetingName, templateType, fullAudioBase64, onProgressCallback) {
         console.log("🚀 並列処理を開始します...");
         const pendingChunks = this.state.chunks.filter(c => c.status !== 'completed');
 
-        // 各チャンクへ会議名を強制設定（保険）
         pendingChunks.forEach(chunk => {
             if (!chunk.meetingName) chunk.meetingName = meetingName || "無題の会議";
         });
 
+        // 🌟 途中パーツの送信（GAS側ではこの段階では保存せず、AI文字起こしだけ行います）
         const promises = pendingChunks.map(chunk => 
             this.sendChunkWithRetry(chunk, onProgressCallback)
         );
@@ -83,7 +83,8 @@ class RecorderController {
         const allCompleted = this.state.chunks.every(c => c.status === 'completed');
         if (allCompleted) {
             console.log("🎉 すべての文字起こしが完了しました！");
-            return await this.mergeAndCreateMinutes(meetingName, templateType);
+            // 🌟 最終結合処理へ全体音声データを引き渡す
+            return await this.mergeAndCreateMinutes(meetingName, templateType, fullAudioBase64);
         } else {
             throw new Error("一部の処理がエラーで停止しました。手動再開をお願いします。");
         }
@@ -102,11 +103,10 @@ class RecorderController {
                     await new Promise(res => setTimeout(res, waitTime));
                 }
 
-                // GASへ送信（会議名とパーツIDも伝達）
                 const payload = {
                     action: "transcribe",
                     meetingName: chunk.meetingName,
-                    chunkId: chunk.id, // 🌟 GAS側で「音声データ_PartX」と命名するために渡す
+                    chunkId: chunk.id,
                     audioData: chunk.base64Data,
                     mimeType: chunk.mimeType 
                 };
@@ -150,30 +150,30 @@ class RecorderController {
     }
 
     // --- 部署4: 結合・総仕上げ担当 ---
-    async mergeAndCreateMinutes(meetingName, templateType) {
+    async mergeAndCreateMinutes(meetingName, templateType, fullAudioBase64) {
         console.log("🔗 テキストの結合を開始します...");
         const sortedChunks = [...this.state.chunks].sort((a, b) => a.id - b.id);
         const fullTranscript = sortedChunks.map(c => c.text).join('\n\n');
 
         let resultData = { transcript: fullTranscript, documentUrl: null, transcriptUrl: null };
 
-        // 🌟 改良：モード②（文字起こしのみ保存）と モード③（議事録まで）の両方でGASへデータ保存
-        if (this.state.mode === '2' || this.state.mode === '3') {
-            console.log("📝 最終処理をGASへ送信します...");
-            
-            const payload = {
-                action: "generateMinutes",
-                text: fullTranscript,
-                meetingName: meetingName || "無題の会議",
-                templateType: templateType || "汎用議事録",
-                mode: this.state.mode // 🌟 現在のモードをGASに伝達
-            };
+        // 🌟 モードに関わらず、最終音声ファイルの保存やドキュメント保存のために必ずGASを呼び出す
+        console.log("📝 最終処理をGASへ送信します...");
+        
+        const payload = {
+            action: "generateMinutes",
+            text: fullTranscript,
+            meetingName: meetingName || "無題の会議",
+            templateType: templateType || "汎用議事録",
+            mode: this.state.mode,
+            fullAudio: fullAudioBase64, // 🌟 統合された全体音声データをGASに届ける
+            mimeType: sortedChunks[0]?.mimeType || 'audio/webm'
+        };
 
-            const response = await this.callGasApi(payload);
-            resultData.documentUrl = response.documentUrl; // 議事録URL (モード③のみ)
-            resultData.transcriptUrl = response.transcriptUrl; // 文字起こしURL (モード②、③共通)
-            console.log("✅ 処理完了: ", response);
-        }
+        const response = await this.callGasApi(payload);
+        resultData.documentUrl = response.documentUrl;
+        resultData.transcriptUrl = response.transcriptUrl;
+        console.log("✅ 最終処理完了: ", response);
 
         this.clearState();
         return resultData;
