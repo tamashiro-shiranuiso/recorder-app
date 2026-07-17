@@ -258,7 +258,7 @@
     <!-- お助けモード（手動再開）パネル -->
     <div class="recovery-panel help" id="recoveryPanel">
         <h4>🛠 お助けモード（手動再開）</h4>
-        <input type="text" placeholder="Googleドライブの音声リンクを貼る">
+        <input type="text" placeholder="Googleドライブ的リンク（※現在未使用）">
         <button class="recovery-btn">この音声から文字起こしを再開</button>
     </div>
 
@@ -411,15 +411,15 @@
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             
-            // 🌟 端末依存の吸収：ブラウザが対応しているMIMEタイプを自動判別
+            // 端末依存の吸収
             let options = {};
-            let mimeType = 'audio/webm'; // デフォルト(Android/Chrome/PC)
+            let mimeType = 'audio/webm';
             
             if (MediaRecorder.isTypeSupported('audio/webm')) {
                 options = { mimeType: 'audio/webm' };
                 mimeType = 'audio/webm';
             } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-                options = { mimeType: 'audio/mp4' }; // iPhone / Safari用
+                options = { mimeType: 'audio/mp4' }; // iPhone / Safari
                 mimeType = 'audio/mp4';
             }
 
@@ -439,8 +439,9 @@
             AppState.mediaRecorder.ondataavailable = async (e) => {
                 if (e.data.size > 0 && window.appController) {
                     const base64 = await blobToBase64(e.data);
-                    // 🌟 現場監督に音声データと一緒に自動検知したMIMEタイプを渡す
-                    window.appController.addAudioChunk(base64, AppState.currentChunkIndex, mimeType);
+                    // 🌟 会議名（空欄チェック含む）を渡して、音声パーツと会議名を連動
+                    const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
+                    window.appController.addAudioChunk(base64, AppState.currentChunkIndex, mimeType, meetingName);
                     
                     const dot = document.createElement('div');
                     dot.className = 'dot';
@@ -476,7 +477,7 @@
             try {
                 if (!window.appController) throw new Error("現場監督のプログラムが読み込まれていません。");
 
-                const meetingName = UI.meetingNameInput.value || "無題の会議";
+                const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
                 const templateType = UI.templateSelect.value;
                 
                 const result = await window.appController.processAllChunks(
@@ -490,10 +491,17 @@
                 UI.statusText.style.color = "#868e96";
                 UI.mainRecordBtn.style.display = "flex";
                 
+                // 🌟 URLポップアップ制御：モード②と③の両方に対応
                 if (result.documentUrl) {
-                    if (confirm("議事録が完成しました！ドキュメントを開きますか？")) {
+                    if (confirm("議事録と文字起こしが完成しました！議事録ドキュメントを開きますか？")) {
                         window.open(result.documentUrl, "_blank");
                     }
+                } else if (result.transcriptUrl) {
+                    if (confirm("文字起こしが完成しました！文字起こしドキュメントを開きますか？")) {
+                        window.open(result.transcriptUrl, "_blank");
+                    }
+                } else {
+                    alert("処理が完了しました！（ドライブの「レコーダー」フォルダを確認してください）");
                 }
 
             } catch (err) {
