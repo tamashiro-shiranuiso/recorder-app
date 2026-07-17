@@ -161,6 +161,10 @@
             color: #868e96; text-align: center; min-height: 24px;
         }
 
+        .elapsed-time {
+            margin-top: 8px; font-size: 13px; color: #adb5bd; text-align: center;
+        }
+
         /* ==========================================
            🎨 進捗表示 ＆ パネル群
            ========================================== */
@@ -249,6 +253,7 @@
     <div class="record-area">
         <button class="record-btn" id="mainRecordBtn">🎤</button>
         <div class="status-text" id="statusText">タップして録音を開始</div>
+        <div class="elapsed-time" id="elapsedTime"></div>
     </div>
 
     <div class="progress-container" id="progressContainer">
@@ -274,27 +279,35 @@
     </div>
 </div>
 
-<!-- キャッシュ強制回避用のバージョン記述を追加(v=2.2 修正版) -->
-<script src="js/recorder-controller.js?v=2.2"></script>
+<!-- キャッシュ強制回避用のバージョン記述を追加(v=3.0 方式B対応版) -->
+<script src="js/recorder-controller.js?v=3.0"></script>
 
 <script>
     // ==========================================
     // 🔧 設定と状態管理
     // ==========================================
+    // 🛠 方式B：
+    //   ・MediaRecorder は録音開始から停止まで「1個だけ」使い続ける
+    //   ・start(timesliceMs) により、CHUNK_INTERVAL_MS ごとに ondataavailable が発火する
+    //   ・1個目の断片だけがEBMLヘッダを持ち、以降は継続クラスタデータのみになるため、
+    //     順番通りGASへ送って追記保存すれば、最終的に正しい1本のwebmになる
     const APP_CONFIG = {
-        CHUNK_INTERVAL_MS: 10000 // テスト用10秒（本番は 600000 = 10分）
+        CHUNK_INTERVAL_MS: 600000 // 本番運用: 10分（テストする場合は短い値に変更してください）
     };
-    
+
     const AppState = {
         isRecording: false,
-        isStopping: false,        // 🌟 追加：停止処理の多重実行防止フラグ
-        currentRecorder: null,    // 🌟 現在のアクティブなレコーダーインスタンス
-        globalStream: null,       // 🌟 永続化されたマイクストリーム
-        chunkTimeout: null,       // 🌟 自動切替タイマー
-        chunkTimerId: 0,          // 🌟 追加：タイマー世代管理ID（競合防止）
-        currentChunkIndex: 0,
-        audioBlobs: [],           // すべての音声パーツ(Blob)を貯める配列
-        mimeType: 'audio/webm'
+        isStopping: false,
+        recorder: null,            // 🌟 録音セッション中ずっと同じインスタンスを使い続ける
+        globalStream: null,
+        chunkIndex: 0,              // 文字起こし用チャンクの通し番号
+        isFirstAudioChunk: true,    // 🌟 音声保存側で「最初の断片か」を管理
+        mimeType: 'audio/webm',
+        recordingStartedAt: null,
+        elapsedTimerId: null,
+        // 🌟 追加：appendAudioChunkの送信を順番通りに実行するためのキュー
+        //   （ondataavailableは発火順が保証されるが、非同期送信が追い越さないようにする）
+        audioSendQueue: Promise.resolve()
     };
 
     const UI = {
@@ -305,6 +318,7 @@
         templateSelect: document.getElementById('templateSelect'),
         mainRecordBtn: document.getElementById('mainRecordBtn'),
         statusText: document.getElementById('statusText'),
+        elapsedTime: document.getElementById('elapsedTime'),
         progressContainer: document.getElementById('progressContainer'),
         dotsGrid: document.getElementById('dotsGrid'),
         progressTitle: document.getElementById('progressTitle'),
@@ -399,7 +413,7 @@
     }
 
     // ==========================================
-    // 🎤 メイン録音・通信ロジック
+    // 🎤 メイン録音・通信ロジック（方式B）
     // ==========================================
     async function handleRecordButtonClick() {
         if (!window.appController || !window.appController.gasUrl) {
@@ -408,7 +422,6 @@
             return;
         }
 
-        // 🌟 追加：停止処理の実行中は録音ボタンの操作を受け付けない（二重発火防止）
         if (AppState.isStopping) {
             console.warn("⚠️ 停止処理を実行中です。しばらくお待ちください。");
             return;
@@ -423,17 +436,19 @@
 
     async function startRecording() {
         try {
-            // 🌟 1. マイクのアクセスストリームを1回だけ取得して永続保持
             AppState.globalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            
+
+            // 🌟 新しい録音セッションを開始（sessionIdを新規発行）
+            if (window.appController) window.appController.startNewSession();
+
             AppState.isRecording = true;
             AppState.isStopping = false;
-            AppState.currentChunkIndex = 0;
-            AppState.audioBlobs = [];
-            AppState.chunkTimerId++; // 🌟 新しい録音セッションのタイマー世代を発行
+            AppState.chunkIndex = 0;
+            AppState.isFirstAudioChunk = true;
+            AppState.audioSendQueue = Promise.resolve();
+            AppState.recordingStartedAt = Date.now();
 
             UI.dotsGrid.innerHTML = '';
-            if (window.appController) window.appController.state.chunks = [];
 
             UI.mainRecordBtn.classList.add('recording');
             UI.mainRecordBtn.innerHTML = "⏹";
@@ -441,8 +456,39 @@
             UI.statusText.style.color = "#fa5252";
             UI.progressContainer.style.display = "none";
 
-            // 🌟 2. 連続ファイル生成のための録音ループ処理を開始
-            recordNextChunk(AppState.chunkTimerId);
+            startElapsedTimeDisplay();
+
+            // 端末の対応フォーマット自動判定
+            let options = {};
+            let mimeType = 'audio/webm';
+            if (MediaRecorder.isTypeSupported('audio/webm')) {
+                options = { mimeType: 'audio/webm' };
+                mimeType = 'audio/webm';
+            } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+                options = { mimeType: 'audio/mp4' };
+                mimeType = 'audio/mp4';
+            }
+            AppState.mimeType = mimeType;
+
+            // 🌟 方式Bの核心：MediaRecorderは録音開始から停止まで「1個だけ」
+            const recorder = new MediaRecorder(AppState.globalStream, options);
+            AppState.recorder = recorder;
+
+            recorder.ondataavailable = (e) => {
+                if (e.data.size === 0) return;
+                handleDataAvailable(e.data, mimeType);
+            };
+
+            recorder.onstop = () => {
+                console.log("🛑 MediaRecorder停止確定");
+                if (typeof AppState._onRecorderStopped === 'function') {
+                    AppState._onRecorderStopped();
+                }
+            };
+
+            // 🌟 timesliceを指定して開始。これにより同一インスタンスのまま
+            //   CHUNK_INTERVAL_MSごとにondataavailableが発火する
+            recorder.start(APP_CONFIG.CHUNK_INTERVAL_MS);
 
         } catch (err) {
             alert("マイクのアクセスが許可されませんでした。ブラウザの設定を確認してください。");
@@ -450,101 +496,47 @@
         }
     }
 
-    // 🌟 連続分割録音ループ（各チャンクが完全に独立した正しい音声ファイルになります）
-    // myTimerId: このループが属するタイマー世代。stopRecordingAndProcess後の
-    //            世代不一致コールバックを無視するために使う（競合防止の要）。
-    async function recordNextChunk(myTimerId) {
-        if (!AppState.isRecording || myTimerId !== AppState.chunkTimerId) return;
+    // 🌟 ondataavailableで届いた断片を「文字起こし用」「音声保存用」の両方に使う
+    function handleDataAvailable(blobPart, mimeType) {
+        const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
+        const currentIndex = AppState.chunkIndex;
+        const isFirst = AppState.isFirstAudioChunk;
+        AppState.isFirstAudioChunk = false;
+        AppState.chunkIndex++;
 
-        // 端末の対応フォーマット自動判定
-        let options = {};
-        let mimeType = 'audio/webm';
-        
-        if (MediaRecorder.isTypeSupported('audio/webm')) {
-            options = { mimeType: 'audio/webm' };
-            mimeType = 'audio/webm';
-        } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-            options = { mimeType: 'audio/mp4' };
-            mimeType = 'audio/mp4';
-        }
-        AppState.mimeType = mimeType;
+        // UIドットを追加（文字起こし進捗表示用）
+        const dot = document.createElement('div');
+        dot.className = 'dot';
+        dot.id = `dot-${currentIndex}`;
+        UI.dotsGrid.appendChild(dot);
 
-        // 保持した同一のストリームを元に、新しいレコーダーインスタンスを生成
-        const recorder = new MediaRecorder(AppState.globalStream, options);
-        AppState.currentRecorder = recorder;
-        let localChunkBlobs = [];
+        // 🌟 送信順序を保証するため、キューに繋げて順番に処理する
+        AppState.audioSendQueue = AppState.audioSendQueue.then(async () => {
+            const base64 = await blobToBase64(blobPart);
 
-        recorder.ondataavailable = (e) => {
-            if (e.data.size > 0) {
-                localChunkBlobs.push(e.data);
-                AppState.audioBlobs.push(e.data); // 最終合体用
-            }
-        };
-
-        // このレコーダーが「止まった（確定した）」時の処理
-        recorder.onstop = async () => {
-            // 🌟 追加：世代が古いコールバックは無視（stopRecordingAndProcess後の遅延発火対策）
-            if (myTimerId !== AppState.chunkTimerId) {
-                console.warn(`⚠️ 古い世代(${myTimerId})のonstopを検知、無視します。`);
-                return;
+            // ① 文字起こし用チャンクとして記録（従来通り。個別のwebm断片として文字起こし依頼する）
+            if (window.appController) {
+                window.appController.addTranscribeChunk(base64, currentIndex, mimeType, meetingName);
             }
 
-            if (localChunkBlobs.length > 0) {
-                // ヘッダー情報が完全に書き込まれた、完結した独立音声ファイルを生成
-                const blob = new Blob(localChunkBlobs, { type: mimeType });
-                const base64 = await blobToBase64(blob);
-                const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
-                
-                // 現場監督に送信指示（100%ヘッダー完備の音データのため、Geminiが絶対にパニックを起こしません）
-                if (window.appController) {
-                    window.appController.addAudioChunk(base64, AppState.currentChunkIndex, mimeType, meetingName);
-                }
-
-                // UIドットを追加
-                const dot = document.createElement('div');
-                dot.className = 'dot';
-                dot.id = `dot-${AppState.currentChunkIndex}`;
-                UI.dotsGrid.appendChild(dot);
-                
-                AppState.currentChunkIndex++;
+            // ② 音声本体の追記保存（方式B・新設）
+            //    1個目はヘッダ持ち、2個目以降はヘッダなし継続データという前提のもと、
+            //    GAS側で単純バイト連結すれば正しい1本のwebmになる
+            if (window.appController) {
+                await window.appController.appendAudioChunk(base64, mimeType, meetingName, isFirst);
             }
-
-            // 録音ステータスが「中」かつ同一世代なら、すぐに次のレコーダーを開始して隙間なく録音を繋ぐ
-            if (AppState.isRecording && myTimerId === AppState.chunkTimerId) {
-                recordNextChunk(myTimerId);
-            } else {
-                // 🌟 追加：これが「最後のチャンクの確定」であることをstopRecordingAndProcessに通知する
-                if (typeof AppState._onLastChunkFinalized === 'function') {
-                    AppState._onLastChunkFinalized();
-                }
-            }
-        };
-
-        recorder.start();
-
-        // 指定時間が来たら自動で停止処理をして、onstopイベントを誘発（次のレコーダーへバトンタッチ）
-        AppState.chunkTimeout = setTimeout(() => {
-            // 🌟 追加：世代チェック（クリア漏れのタイマーが誤発火しても無害化）
-            if (myTimerId !== AppState.chunkTimerId) return;
-            if (recorder.state === "recording") {
-                recorder.stop();
-            }
-        }, APP_CONFIG.CHUNK_INTERVAL_MS);
+        }).catch(err => {
+            console.error("❌ チャンク処理中にエラー:", err);
+        });
     }
 
     async function stopRecordingAndProcess() {
-        // 🌟 追加：多重実行防止（ボタン連打・イベント多重発火対策）
         if (AppState.isStopping) return;
         AppState.isStopping = true;
-
-        // 🌟 再帰ループを停止するため、即座にフラグを下ろす
         AppState.isRecording = false;
-        clearTimeout(AppState.chunkTimeout);
-        AppState.chunkTimerId++; // 🌟 世代を進める＝以降の古いonstop/timeoutコールバックは全て無効化される
+        stopElapsedTimeDisplay();
 
-        const myTimerId = AppState.chunkTimerId - 1; // 直前まで有効だった世代（＝最後の録音チャンクの世代）
-
-        UI.mainRecordBtn.disabled = true; // 🌟 追加：処理中はボタン操作を無効化
+        UI.mainRecordBtn.disabled = true;
         UI.mainRecordBtn.classList.remove('recording');
         UI.mainRecordBtn.innerHTML = "🎤";
         UI.mainRecordBtn.style.display = "none";
@@ -552,17 +544,21 @@
         UI.statusText.style.color = "#4dabf7";
 
         try {
-            // 🌟 修正：時間の決め打ち(setTimeout 1.5秒)ではなく、
-            // 「最後のチャンクのonstopが確実に完了する」のをPromiseで待つ
-            await waitForLastChunkToFinalize(myTimerId);
+            // 🌟 最後の断片（stop時点までの未送信データ）を確定させてから停止を待つ
+            await waitForRecorderToStop();
 
-            // 赤ランプを消すため、マイクの物理接続を完全にオフ
+            // マイクの物理接続を完全にオフ
             if (AppState.globalStream) {
                 AppState.globalStream.getTracks().forEach(track => track.stop());
                 AppState.globalStream = null;
             }
 
-            UI.statusText.innerHTML = "✨ AIにデータを送信中...";
+            // 🌟 重要：最後の ondataavailable ぶんの送信キューが完了するのを待つ
+            //   （onstop発火後も、handleDataAvailable内の非同期処理が終わっていない可能性があるため）
+            UI.statusText.innerHTML = "✨ 最後の音声データを保存中...";
+            await AppState.audioSendQueue;
+
+            UI.statusText.innerHTML = "✨ AIが文字起こし中...";
             UI.progressContainer.style.display = "block";
             UI.progressTitle.innerHTML = "AIが音声を処理中...";
 
@@ -571,22 +567,15 @@
             const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
             const templateType = UI.templateSelect.value;
 
-            // 蓄積された音声データを1本化
-            // ⚠️ 注意：この単純結合は暫定対応です。分割数が多い場合、
-            // コンテナヘッダーが複数回混入し、正しく再生できない音声になる
-            // 可能性があります。詳細は別途ご相談ください。
-            const fullAudioBlob = new Blob(AppState.audioBlobs, { type: AppState.mimeType });
-            const fullAudioBase64 = await blobToBase64(fullAudioBlob);
-
+            // 🌟 方式Bの利点：ここで巨大な音声Blobを再送信する必要がない
+            //   （録音中に既にGAS側の一時ファイルへ保存済みのため）
             const result = await window.appController.processAllChunks(
                 meetingName,
                 templateType,
-                fullAudioBase64,
                 updateProgressUI
             );
 
             if (!result) {
-                // 🌟 追加：ガードにより処理がスキップされた場合（多重呼び出し防止が働いた場合）
                 console.warn("⚠️ processAllChunksがスキップされました（多重実行防止）。");
                 return;
             }
@@ -595,6 +584,10 @@
             UI.statusText.innerHTML = "タップして新しい録音を開始";
             UI.statusText.style.color = "#868e96";
             UI.mainRecordBtn.style.display = "flex";
+
+            if (result.audioWarning) {
+                alert("⚠️ 録音中に音声の一部保存でエラーが発生した可能性があります。音声データをご確認ください。");
+            }
 
             if (result.documentUrl) {
                 if (confirm("議事録と統合音声が完成しました！議事録ドキュメントを開きますか？")) {
@@ -619,14 +612,11 @@
         }
     }
 
-    // 🌟 追加：最後のチャンクのonstop処理が完了するのを確実に待つヘルパー
-    // 「1.5秒待てば終わっているはず」という決め打ちをやめ、実際の完了イベントを待つ。
-    function waitForLastChunkToFinalize(myTimerId) {
+    // 🌟 MediaRecorder.stop() を確実に待つヘルパー
+    function waitForRecorderToStop() {
         return new Promise((resolve) => {
-            // すでに録音中でない（=レコーダーがそもそも動いていない）場合は即解決
-            if (!AppState.currentRecorder || AppState.currentRecorder.state !== "recording") {
-                // 念のため少しだけ待って解決（onstopが直前に発火していた場合の取りこぼし防止）
-                setTimeout(resolve, 50);
+            if (!AppState.recorder || AppState.recorder.state !== "recording") {
+                resolve();
                 return;
             }
 
@@ -634,23 +624,39 @@
             const finalize = () => {
                 if (settled) return;
                 settled = true;
-                AppState._onLastChunkFinalized = null;
+                AppState._onRecorderStopped = null;
                 resolve();
             };
 
-            // recordNextChunk の onstop 側から呼んでもらうコールバック
-            AppState._onLastChunkFinalized = finalize;
+            AppState._onRecorderStopped = finalize;
+            AppState.recorder.stop(); // 🌟 これにより最後のondataavailableも発火してからonstopが呼ばれる
 
-            // 現在動いているレコーダーを止めてonstopを発火させる
-            if (AppState.currentRecorder.state === "recording") {
-                AppState.currentRecorder.stop();
-            } else {
-                finalize();
-            }
-
-            // 🌟 保険：万一onstopが発火しない異常系でも、最大3秒でタイムアウトして先に進む
-            setTimeout(finalize, 3000);
+            // 保険：万一onstopが発火しない異常系でも最大5秒でタイムアウト
+            setTimeout(finalize, 5000);
         });
+    }
+
+    // ==========================================
+    // ⏱️ 経過時間表示（長時間録音の目安用）
+    // ==========================================
+    function startElapsedTimeDisplay() {
+        updateElapsedTimeText();
+        AppState.elapsedTimerId = setInterval(updateElapsedTimeText, 1000);
+    }
+    function stopElapsedTimeDisplay() {
+        if (AppState.elapsedTimerId) {
+            clearInterval(AppState.elapsedTimerId);
+            AppState.elapsedTimerId = null;
+        }
+        UI.elapsedTime.textContent = "";
+    }
+    function updateElapsedTimeText() {
+        if (!AppState.recordingStartedAt) return;
+        const sec = Math.floor((Date.now() - AppState.recordingStartedAt) / 1000);
+        const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+        const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+        const s = String(sec % 60).padStart(2, '0');
+        UI.elapsedTime.textContent = `経過時間 ${h}:${m}:${s}`;
     }
 
     function blobToBase64(blob) {
