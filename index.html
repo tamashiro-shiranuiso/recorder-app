@@ -76,7 +76,7 @@
         .btn-pill:hover { border-color: #fab005; color: #fab005; background: #fff9db; }
 
         /* ==========================================
-           🎨 入力フォーム
+           🎨 入力フォーム ＆ 小さなマイクボタン
            ========================================== */
         .input-group { margin-bottom: 20px; }
         .input-group label {
@@ -89,6 +89,44 @@
         }
         input[type="text"]:focus, select:focus {
             border-color: #74c0fc; background-color: #ffffff; box-shadow: 0 0 0 4px rgba(116, 192, 252, 0.15);
+        }
+
+        /* 🌟 入力欄の中のマイクボタン用スタイル */
+        .input-with-icon {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+        .input-with-icon input {
+            padding-right: 50px; /* マイクボタンのスペースを確保 */
+        }
+        .mini-mic-btn {
+            position: absolute;
+            right: 8px;
+            background: #fff;
+            border: 2px solid #f1f3f5;
+            width: 38px;
+            height: 38px;
+            border-radius: 12px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: #495057;
+        }
+        .mini-mic-btn:hover { background: #f8f9fa; border-color: #dee2e6; }
+        .mini-mic-btn.listening {
+            background: #fa5252;
+            border-color: #fa5252;
+            color: white;
+            animation: pulseMini 1.5s infinite;
+        }
+        @keyframes pulseMini {
+            0% { box-shadow: 0 0 0 0 rgba(250, 82, 82, 0.5); }
+            70% { box-shadow: 0 0 0 10px rgba(250, 82, 82, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(250, 82, 82, 0); }
         }
 
         /* ==========================================
@@ -184,7 +222,11 @@
 
     <div class="input-group">
         <label>会議名・内容 (ファイル名)</label>
-        <input type="text" id="meetingNameInput" placeholder="例：〇〇様 担当者会議">
+        <!-- 🌟 会議名入力欄とマイクボタンをグループ化 -->
+        <div class="input-with-icon">
+            <input type="text" id="meetingNameInput" placeholder="例：〇〇様 担当者会議">
+            <button class="mini-mic-btn" id="meetingNameMicBtn" title="音声で入力">🎙️</button>
+        </div>
     </div>
 
     <div class="input-group">
@@ -222,7 +264,7 @@
         <button class="recovery-btn">この音声から文字起こしを再開</button>
     </div>
 
-    <!-- 🌟 追加：システム設定パネル -->
+    <!-- システム設定パネル -->
     <div class="recovery-panel settings" id="settingsPanel">
         <h4>⚙️ システム設定</h4>
         <div class="input-group" style="margin-bottom: 0;">
@@ -241,8 +283,7 @@
     // 🔧 設定と状態管理
     // ==========================================
     const APP_CONFIG = {
-        // テスト用に10秒に設定しています。本番は 600000 に変更してください。
-        CHUNK_INTERVAL_MS: 10000 
+        CHUNK_INTERVAL_MS: 10000 // テスト用（本番は 600000）
     };
     
     const AppState = {
@@ -256,14 +297,13 @@
         modeSelect: document.getElementById('modeSelect'),
         templateGroup: document.getElementById('templateGroup'),
         meetingNameInput: document.getElementById('meetingNameInput'),
+        meetingNameMicBtn: document.getElementById('meetingNameMicBtn'), // 🌟 追加：小さいマイクボタン
         templateSelect: document.getElementById('templateSelect'),
         mainRecordBtn: document.getElementById('mainRecordBtn'),
         statusText: document.getElementById('statusText'),
         progressContainer: document.getElementById('progressContainer'),
         dotsGrid: document.getElementById('dotsGrid'),
         progressTitle: document.getElementById('progressTitle'),
-        
-        // パネル群
         showRecoveryBtn: document.getElementById('showRecoveryBtn'),
         recoveryPanel: document.getElementById('recoveryPanel'),
         settingsBtn: document.getElementById('settingsBtn'),
@@ -276,6 +316,52 @@
     // 💡 イベントの紐付け
     // ==========================================
     function bindEvents() {
+        // 🌟 会議名の音声入力（Web Speech API）
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRecognition) {
+            const recognition = new SpeechRecognition();
+            recognition.lang = 'ja-JP';
+            recognition.interimResults = false;
+            recognition.continuous = false;
+
+            // マイクボタンを押した時
+            UI.meetingNameMicBtn.addEventListener('click', () => {
+                recognition.start();
+            });
+
+            // 録音開始時（見た目を赤くする）
+            recognition.onstart = () => {
+                UI.meetingNameMicBtn.classList.add('listening');
+                UI.meetingNameInput.placeholder = "お話しください...";
+                UI.meetingNameInput.value = ""; // 入力をクリア
+            };
+
+            // 音声がテキストに変換された時
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                // 末尾の句点（。や空白）を綺麗に除去してセット
+                UI.meetingNameInput.value = transcript.replace(/[。、.\s]+$/, '');
+            };
+
+            // 録音終了時（見た目を元に戻す）
+            recognition.onend = () => {
+                UI.meetingNameMicBtn.classList.remove('listening');
+                UI.meetingNameInput.placeholder = "例：〇〇様 担当者会議";
+            };
+
+            // エラー時
+            recognition.onerror = (event) => {
+                UI.meetingNameMicBtn.classList.remove('listening');
+                UI.meetingNameInput.placeholder = "例：〇〇様 担当者会議";
+                if(event.error !== 'no-speech') {
+                    console.warn("音声入力エラー:", event.error);
+                }
+            };
+        } else {
+            // ブラウザが音声入力に非対応の場合はボタンを隠す
+            UI.meetingNameMicBtn.style.display = 'none';
+        }
+
         // モード切替のUI制御
         UI.modeSelect.addEventListener('change', (e) => {
             if (window.appController) window.appController.state.mode = e.target.value;
@@ -292,7 +378,7 @@
             UI.recoveryPanel.style.display = UI.recoveryPanel.style.display === 'block' ? 'none' : 'block';
             if(UI.recoveryPanel.style.display === 'block') {
                 UI.recoveryPanel.classList.add('fade-in');
-                UI.settingsPanel.style.display = 'none'; // もう片方は閉じる
+                UI.settingsPanel.style.display = 'none';
             }
         });
 
@@ -301,8 +387,7 @@
             UI.settingsPanel.style.display = UI.settingsPanel.style.display === 'block' ? 'none' : 'block';
             if(UI.settingsPanel.style.display === 'block') {
                 UI.settingsPanel.classList.add('fade-in');
-                UI.recoveryPanel.style.display = 'none'; // もう片方は閉じる
-                // 現在保存されているURLを入力欄にセット
+                UI.recoveryPanel.style.display = 'none';
                 UI.gasUrlInput.value = window.appController ? window.appController.gasUrl : "";
             }
         });
@@ -311,8 +396,8 @@
         UI.saveSettingsBtn.addEventListener('click', () => {
             const url = UI.gasUrlInput.value.trim();
             if(url) {
-                localStorage.setItem('saved_gas_url', url); // ブラウザに記憶
-                if(window.appController) window.appController.gasUrl = url; // 現場監督に伝える
+                localStorage.setItem('saved_gas_url', url);
+                if(window.appController) window.appController.gasUrl = url;
                 alert("設定を保存しました！");
                 UI.settingsPanel.style.display = 'none';
             } else {
@@ -325,10 +410,9 @@
     }
 
     // ==========================================
-    // 🎤 録音・通信のメインロジック
+    // 🎤 メイン録音・通信ロジック
     // ==========================================
     async function handleRecordButtonClick() {
-        // 🌟 ガード処理：GASのURLが設定されていない場合は録音させない
         if (!window.appController || !window.appController.gasUrl) {
             alert("初回設定が必要です！\n右上の「⚙️設定」ボタンから、GASウェブアプリのURLを登録してください。");
             if(UI.settingsPanel.style.display !== 'block') UI.settingsBtn.click();
