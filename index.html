@@ -3,9 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>レコーダーアプリ (UIプレビュー)</title>
+    <title>レコーダーアプリ</title>
     <style>
-        /* ベース設定：温かみのあるオフホワイト背景 */
+        /* ==========================================
+           🎨 ベース設定 ＆ レイアウト
+           ========================================== */
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             background-color: #f8f9fa;
@@ -18,7 +20,6 @@
             min-height: 100dvh;
         }
 
-        /* メインカード：超角丸と柔らかなシャドウ */
         .app-container {
             background-color: #ffffff;
             width: 100%;
@@ -29,6 +30,7 @@
             display: flex;
             flex-direction: column;
             position: relative;
+            box-sizing: border-box;
         }
 
         @media (min-width: 500px) {
@@ -40,7 +42,9 @@
             }
         }
 
-        /* ヘッダー */
+        /* ==========================================
+           🎨 ヘッダー ＆ ボタン
+           ========================================== */
         .header {
             display: flex;
             justify-content: space-between;
@@ -55,107 +59,54 @@
             letter-spacing: -0.5px;
         }
         
-        /* ヘッダー右側のボタングループを横並びにする */
-        .header-actions {
-            display: flex;
-            gap: 12px;
-            align-items: center;
-        }
+        .header-actions { display: flex; gap: 12px; align-items: center; }
 
         .btn-icon {
-            background: #f1f3f5;
-            border: none;
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            font-size: 18px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            display: flex;
-            justify-content: center;
-            align-items: center;
+            background: #f1f3f5; border: none; width: 40px; height: 40px;
+            border-radius: 50%; font-size: 18px; cursor: pointer;
+            transition: all 0.2s ease; display: flex; justify-content: center; align-items: center;
         }
         .btn-icon:hover { background: #e9ecef; transform: scale(1.05); }
 
-        /* 分かりやすいテキスト付きのリカバリーボタン */
         .btn-pill {
-            background: #fff;
-            border: 2px solid #e9ecef;
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-size: 13px;
-            font-weight: bold;
-            color: #495057;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            display: flex;
-            align-items: center;
-            gap: 6px;
+            background: #fff; border: 2px solid #e9ecef; padding: 8px 16px;
+            border-radius: 20px; font-size: 13px; font-weight: bold; color: #495057;
+            cursor: pointer; transition: all 0.2s ease; display: flex; align-items: center; gap: 6px;
         }
-        .btn-pill:hover {
-            border-color: #fab005;
-            color: #fab005;
-            background: #fff9db;
-        }
+        .btn-pill:hover { border-color: #fab005; color: #fab005; background: #fff9db; }
 
-        /* 入力フォーム：優しく丸いデザイン */
-        .input-group {
-            margin-bottom: 20px;
-        }
+        /* ==========================================
+           🎨 入力フォーム
+           ========================================== */
+        .input-group { margin-bottom: 20px; }
         .input-group label {
-            display: block;
-            margin-bottom: 8px;
-            font-size: 14px;
-            font-weight: 600;
-            color: #868e96;
+            display: block; margin-bottom: 8px; font-size: 14px; font-weight: 600; color: #868e96;
         }
         input[type="text"], select {
-            width: 100%;
-            padding: 16px;
-            border: 2px solid #f1f3f5;
-            border-radius: 16px;
-            font-size: 16px;
-            color: #495057;
-            background-color: #f8f9fa;
-            transition: all 0.2s ease;
-            box-sizing: border-box;
-            outline: none;
+            width: 100%; padding: 16px; border: 2px solid #f1f3f5; border-radius: 16px;
+            font-size: 16px; color: #495057; background-color: #f8f9fa;
+            transition: all 0.2s ease; box-sizing: border-box; outline: none;
         }
         input[type="text"]:focus, select:focus {
-            border-color: #74c0fc;
-            background-color: #ffffff;
-            box-shadow: 0 0 0 4px rgba(116, 192, 252, 0.15);
+            border-color: #74c0fc; background-color: #ffffff; box-shadow: 0 0 0 4px rgba(116, 192, 252, 0.15);
         }
 
-        /* 主役：巨大な録音ボタン */
+        /* ==========================================
+           🎨 メイン録音エリア
+           ========================================== */
         .record-area {
-            flex-grow: 1;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            margin: 40px 0;
+            flex-grow: 1; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; margin: 40px 0;
         }
         .record-btn {
-            width: 120px;
-            height: 120px;
-            border-radius: 50%;
-            border: none;
-            background: linear-gradient(135deg, #74c0fc, #4dabf7);
-            color: white;
-            font-size: 48px;
-            cursor: pointer;
-            box-shadow: 0 10px 20px rgba(77, 171, 247, 0.3);
+            width: 120px; height: 120px; border-radius: 50%; border: none;
+            background: linear-gradient(135deg, #74c0fc, #4dabf7); color: white;
+            font-size: 48px; cursor: pointer; box-shadow: 0 10px 20px rgba(77, 171, 247, 0.3);
             transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            display: flex;
-            justify-content: center;
-            align-items: center;
+            display: flex; justify-content: center; align-items: center;
         }
-        .record-btn:active {
-            transform: scale(0.9);
-        }
+        .record-btn:active { transform: scale(0.9); }
         
-        /* 録音中のパルスアニメーション（ベリーレッド） */
         .record-btn.recording {
             background: linear-gradient(135deg, #ff8787, #fa5252);
             box-shadow: 0 0 0 0 rgba(250, 82, 82, 0.7);
@@ -168,71 +119,38 @@
         }
 
         .status-text {
-            margin-top: 24px;
-            font-size: 16px;
-            font-weight: 600;
-            color: #868e96;
-            text-align: center;
-            min-height: 24px;
+            margin-top: 24px; font-size: 16px; font-weight: 600;
+            color: #868e96; text-align: center; min-height: 24px;
         }
 
-        /* 並列処理の進捗たまご（ドット） */
+        /* ==========================================
+           🎨 進捗表示 ＆ リカバリーパネル
+           ========================================== */
         .progress-container {
-            display: none;
-            background-color: #f8f9fa;
-            padding: 24px;
-            border-radius: 20px;
-            margin-top: 20px;
+            display: none; background-color: #f8f9fa; padding: 24px;
+            border-radius: 20px; margin-top: 20px;
         }
         .progress-title {
-            font-size: 14px;
-            font-weight: 700;
-            color: #495057;
-            margin-bottom: 16px;
-            text-align: center;
+            font-size: 14px; font-weight: 700; color: #495057;
+            margin-bottom: 16px; text-align: center;
         }
-        .dots-grid {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            justify-content: center;
-        }
+        .dots-grid { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
         .dot {
-            width: 18px;
-            height: 18px;
-            border-radius: 50%;
-            background-color: #dee2e6;
-            transition: all 0.4s ease;
+            width: 18px; height: 18px; border-radius: 50%;
+            background-color: #dee2e6; transition: all 0.4s ease;
         }
-        /* 処理中（青） */
         .dot.processing {
-            background-color: #4dabf7;
-            box-shadow: 0 0 8px rgba(77, 171, 247, 0.6);
+            background-color: #4dabf7; box-shadow: 0 0 8px rgba(77, 171, 247, 0.6);
             animation: bounce 1s infinite alternate;
         }
-        /* 完了（緑） */
-        .dot.complete {
-            background-color: #40c057;
-            transform: scale(1.1);
-        }
-        /* エラー（オレンジ） */
-        .dot.error {
-            background-color: #fab005;
-        }
-        @keyframes bounce {
-            0% { transform: translateY(0); }
-            100% { transform: translateY(-4px); }
-        }
+        .dot.complete { background-color: #40c057; transform: scale(1.1); }
+        .dot.error { background-color: #fab005; }
+        @keyframes bounce { 0% { transform: translateY(0); } 100% { transform: translateY(-4px); } }
 
-        /* 手動リカバリーパネル（グラスモフィズム） */
         .recovery-panel {
-            display: none;
-            margin-top: 20px;
-            padding: 20px;
-            background: rgba(255, 255, 255, 0.7);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(0, 0, 0, 0.05);
-            border-radius: 20px;
+            display: none; margin-top: 20px; padding: 20px;
+            background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(10px);
+            border: 1px solid rgba(0, 0, 0, 0.05); border-radius: 20px;
         }
         .recovery-panel h4 { margin: 0 0 10px 0; color: #fab005; font-size: 15px; }
         .recovery-btn {
@@ -252,20 +170,18 @@
 <div class="app-container">
     <div class="header">
         <h2>🎙 レコーダー</h2>
-        <!-- 修正したヘッダー右側の横並びボタングループ -->
         <div class="header-actions">
-            <!-- テキスト付きの手動再開ボタン -->
             <button class="btn-pill" title="手動で途中から再開する" id="showRecoveryBtn">
                 <span>🛠</span> 手動再開
             </button>
-            <!-- 設定ボタン -->
             <button class="btn-icon" title="設定">⚙️</button>
         </div>
     </div>
 
     <div class="input-group">
         <label>会議名・内容 (ファイル名)</label>
-        <input type="text" placeholder="例：〇〇様 担当者会議">
+        <!-- 💡 変更点: IDを追加しました -->
+        <input type="text" id="meetingNameInput" placeholder="例：〇〇様 担当者会議">
     </div>
 
     <div class="input-group">
@@ -279,10 +195,11 @@
 
     <div class="input-group fade-in" id="templateGroup">
         <label>議事録テンプレート</label>
-        <select>
-            <option>汎用議事録</option>
-            <option>サービス担当者会議録</option>
-            <option>苦情・要望等受付</option>
+        <!-- 💡 変更点: IDとvalueを追加しました -->
+        <select id="templateSelect">
+            <option value="汎用議事録">汎用議事録</option>
+            <option value="サービス担当者会議録">サービス担当者会議録</option>
+            <option value="苦情・要望等受付">苦情・要望等受付</option>
         </select>
     </div>
 
@@ -291,15 +208,11 @@
         <div class="status-text" id="statusText">タップして録音を開始</div>
     </div>
 
-    <!-- 並列処理の進捗たまご -->
     <div class="progress-container" id="progressContainer">
         <div class="progress-title" id="progressTitle">AIが音声を処理中...</div>
-        <div class="dots-grid" id="dotsGrid">
-            <!-- 12個のドットをJavaScriptで生成します -->
-        </div>
+        <div class="dots-grid" id="dotsGrid"></div>
     </div>
 
-    <!-- お助けモード（リカバリー）パネル -->
     <div class="recovery-panel" id="recoveryPanel">
         <h4>🛠 お助けモード（手動再開）</h4>
         <input type="text" placeholder="Googleドライブの音声リンクを貼る">
@@ -307,114 +220,200 @@
     </div>
 </div>
 
+<!-- 現場監督（ミドルエンド）のプログラムを読み込む -->
+<script src="js/recorder-controller.js"></script>
+
 <script>
-    // --- UIの動きを確認するためのダミープログラ厶 ---
-    const modeSelect = document.getElementById('modeSelect');
-    const templateGroup = document.getElementById('templateGroup');
-    const mainRecordBtn = document.getElementById('mainRecordBtn');
-    const statusText = document.getElementById('statusText');
-    const progressContainer = document.getElementById('progressContainer');
-    const dotsGrid = document.getElementById('dotsGrid');
-    const showRecoveryBtn = document.getElementById('showRecoveryBtn');
-    const recoveryPanel = document.getElementById('recoveryPanel');
+    // ==========================================
+    // 🔧 設定と状態管理（保守性のためのリファクタリング）
+    // ==========================================
+    const APP_CONFIG = {
+        CHUNK_INTERVAL_MS: 600000 // 自動スライス間隔（600000 = 10分）。テスト時は 10000 (10秒) などに変更
+    };
 
-    let isRecording = false;
+    const AppState = {
+        isRecording: false,
+        mediaRecorder: null,
+        currentChunkIndex: 0
+    };
 
-    // モード切替でテンプレートを隠す/出す
-    modeSelect.addEventListener('change', (e) => {
-        if(e.target.value === "3") {
-            templateGroup.style.display = "block";
-            templateGroup.classList.add('fade-in');
-        } else {
-            templateGroup.style.display = "none";
-        }
-    });
+    // 画面上の部品（UI要素）をすべてここにまとめる
+    const UI = {
+        modeSelect: document.getElementById('modeSelect'),
+        templateGroup: document.getElementById('templateGroup'),
+        meetingNameInput: document.getElementById('meetingNameInput'),
+        templateSelect: document.getElementById('templateSelect'),
+        mainRecordBtn: document.getElementById('mainRecordBtn'),
+        statusText: document.getElementById('statusText'),
+        progressContainer: document.getElementById('progressContainer'),
+        dotsGrid: document.getElementById('dotsGrid'),
+        progressTitle: document.getElementById('progressTitle'),
+        showRecoveryBtn: document.getElementById('showRecoveryBtn'),
+        recoveryPanel: document.getElementById('recoveryPanel')
+    };
 
-    // リカバリーパネルの開閉
-    showRecoveryBtn.addEventListener('click', () => {
-        recoveryPanel.style.display = recoveryPanel.style.display === 'block' ? 'none' : 'block';
-        if(recoveryPanel.style.display === 'block') {
-            recoveryPanel.classList.add('fade-in');
-        }
-    });
 
-    // ドットを12個生成
-    for (let i = 0; i < 12; i++) {
-        const dot = document.createElement('div');
-        dot.className = 'dot';
-        dot.id = `dot-${i}`;
-        dotsGrid.appendChild(dot);
-    }
-
-    // 主役ボタンのクリック挙動（録音開始 → 停止・処理開始）
-    mainRecordBtn.addEventListener('click', () => {
-        if (!isRecording) {
-            // 録音開始の動き
-            isRecording = true;
-            mainRecordBtn.classList.add('recording');
-            mainRecordBtn.innerHTML = "⏹"; // 停止アイコン
-            statusText.innerHTML = "🔴 録音中... (タップして終了)";
-            statusText.style.color = "#fa5252";
-            progressContainer.style.display = "none";
+    // ==========================================
+    // 💡 イベントの紐付け（初期化）
+    // ==========================================
+    function bindEvents() {
+        // モード切替のUI制御
+        UI.modeSelect.addEventListener('change', (e) => {
+            if (window.appController) window.appController.state.mode = e.target.value;
             
-            // ドットをリセット
-            document.querySelectorAll('.dot').forEach(d => d.className = 'dot');
-        } else {
-            // 録音停止・処理開始の動き
-            isRecording = false;
-            mainRecordBtn.classList.remove('recording');
-            mainRecordBtn.innerHTML = "🎤";
-            mainRecordBtn.style.display = "none"; // ボタンを隠して処理に集中させる
-            statusText.innerHTML = "✨ データを分割してAIに送信中...";
-            statusText.style.color = "#4dabf7";
-            
-            progressContainer.style.display = "block";
-            progressContainer.classList.add('fade-in');
-            
-            // 進捗ドットのデモアニメーション
-            simulateProgress();
-        }
-    });
-
-    function simulateProgress() {
-        const dots = document.querySelectorAll('.dot');
-        // 全部青色（処理中）にする
-        dots.forEach(d => d.classList.add('processing'));
-        
-        // ランダムなタイミングで緑色（完了）に変えていく
-        dots.forEach((d, index) => {
-            const randomTime = Math.floor(Math.random() * 3000) + 1000 * (index / 2);
-            setTimeout(() => {
-                d.classList.remove('processing');
-                d.classList.add('complete');
-                
-                // ひとつだけエラーを混ぜてみる（5番目）
-                if(index === 5) {
-                    d.classList.remove('complete');
-                    d.classList.add('error');
-                    setTimeout(() => { 
-                        // 自動リトライで治った演出
-                        d.classList.remove('error'); 
-                        d.classList.add('processing'); 
-                        setTimeout(() => { d.classList.remove('processing'); d.classList.add('complete'); }, 1500);
-                    }, 2000);
-                }
-            }, randomTime);
+            if (e.target.value === "3") {
+                UI.templateGroup.style.display = "block";
+                UI.templateGroup.classList.add('fade-in');
+            } else {
+                UI.templateGroup.style.display = "none";
+            }
         });
 
-        // 全部終わった風の演出
-        setTimeout(() => {
-            document.getElementById('progressTitle').innerHTML = "📝 議事録を作成中...";
-            setTimeout(() => {
-                document.getElementById('progressTitle').innerHTML = "🎉 完了しました！";
-                mainRecordBtn.style.display = "flex"; // ボタン復活
-                statusText.innerHTML = "タップして新しい録音を開始";
-                statusText.style.color = "#868e96";
-            }, 3000);
-        }, 6000);
+        // リカバリーパネルの開閉
+        UI.showRecoveryBtn.addEventListener('click', () => {
+            UI.recoveryPanel.style.display = UI.recoveryPanel.style.display === 'block' ? 'none' : 'block';
+            if(UI.recoveryPanel.style.display === 'block') UI.recoveryPanel.classList.add('fade-in');
+        });
+
+        // 巨大な主役ボタン（マイク）のクリック
+        UI.mainRecordBtn.addEventListener('click', handleRecordButtonClick);
     }
+
+
+    // ==========================================
+    // 🎤 録音・通信のメインロジック
+    // ==========================================
+    async function handleRecordButtonClick() {
+        if (!AppState.isRecording) {
+            await startRecording();
+        } else {
+            await stopRecordingAndProcess();
+        }
+    }
+
+    async function startRecording() {
+        try {
+            // マイクのアクセス許可を求める
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            AppState.mediaRecorder = new MediaRecorder(stream);
+            AppState.currentChunkIndex = 0;
+            
+            // UIと記憶の初期化
+            UI.dotsGrid.innerHTML = '';
+            if (window.appController) window.appController.state.chunks = [];
+
+            // 録音中の見た目に変更
+            AppState.isRecording = true;
+            UI.mainRecordBtn.classList.add('recording');
+            UI.mainRecordBtn.innerHTML = "⏹";
+            UI.statusText.innerHTML = "🔴 録音中... (タップして終了)";
+            UI.statusText.style.color = "#fa5252";
+            UI.progressContainer.style.display = "none";
+
+            // 指定時間ごとにデータが切り出された時の処理
+            AppState.mediaRecorder.ondataavailable = async (e) => {
+                if (e.data.size > 0 && window.appController) {
+                    const base64 = await blobToBase64(e.data);
+                    window.appController.addAudioChunk(base64, AppState.currentChunkIndex);
+                    
+                    // UIに新しい進捗たまご（ドット）を追加
+                    const dot = document.createElement('div');
+                    dot.className = 'dot';
+                    dot.id = `dot-${AppState.currentChunkIndex}`;
+                    UI.dotsGrid.appendChild(dot);
+                    
+                    AppState.currentChunkIndex++;
+                }
+            };
+
+            // 録音スタート（設定した間隔で自動カット）
+            AppState.mediaRecorder.start(APP_CONFIG.CHUNK_INTERVAL_MS); 
+
+        } catch (err) {
+            alert("マイクのアクセスが許可されませんでした。ブラウザの設定を確認してください。");
+            console.error("Audio Error:", err);
+        }
+    }
+
+    async function stopRecordingAndProcess() {
+        AppState.isRecording = false;
+        AppState.mediaRecorder.stop();
+        // マイクの赤いランプ（ストリーム）を安全に消灯する
+        AppState.mediaRecorder.stream.getTracks().forEach(track => track.stop());
+
+        // 処理中の見た目に変更
+        UI.mainRecordBtn.classList.remove('recording');
+        UI.mainRecordBtn.innerHTML = "🎤";
+        UI.mainRecordBtn.style.display = "none";
+        UI.statusText.innerHTML = "✨ AIにデータを送信中...";
+        UI.statusText.style.color = "#4dabf7";
+        UI.progressContainer.style.display = "block";
+        UI.progressTitle.innerHTML = "AIが音声を処理中...";
+        
+        // 最後の音声パーツが切り出されるのを少し待ってからGASへ送信開始
+        setTimeout(async () => {
+            try {
+                if (!window.appController) throw new Error("現場監督のプログラムが読み込まれていません。");
+
+                const meetingName = UI.meetingNameInput.value || "無題の会議";
+                const templateType = UI.templateSelect.value;
+                
+                // 🚀 現場監督に並列処理のスタートを指示
+                const result = await window.appController.processAllChunks(
+                    meetingName, 
+                    templateType, 
+                    updateProgressUI
+                );
+                
+                // 🎉 完了時の見た目に変更
+                UI.progressTitle.innerHTML = "🎉 処理が完了しました！";
+                UI.statusText.innerHTML = "タップして新しい録音を開始";
+                UI.statusText.style.color = "#868e96";
+                UI.mainRecordBtn.style.display = "flex";
+                
+                if (result.documentUrl) {
+                    if (confirm("議事録が完成しました！ドキュメントを開きますか？")) {
+                        window.open(result.documentUrl, "_blank");
+                    }
+                }
+
+            } catch (err) {
+                alert("エラーが発生しました: " + err.message);
+                UI.mainRecordBtn.style.display = "flex";
+                UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
+                UI.statusText.style.color = "#fa5252";
+            }
+        }, 1000);
+    }
+
+    // ==========================================
+    // 🛠 補助ツール群
+    // ==========================================
+    
+    // Blob（バイナリ）をBase64（文字列）に変換する関数
+    function blobToBase64(blob) {
+        return new Promise((resolve, _) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result.split(',')[1]);
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    // 現場監督からの指示でドットの色を更新する関数
+    function updateProgressUI(chunks) {
+        chunks.forEach(chunk => {
+            const dot = document.getElementById(`dot-${chunk.id}`);
+            if (dot) {
+                dot.className = 'dot'; // クラスをリセット
+                if (chunk.status === 'processing') dot.classList.add('processing');
+                else if (chunk.status === 'completed') dot.classList.add('complete');
+                else if (chunk.status === 'error') dot.classList.add('error');
+            }
+        });
+    }
+
+    // イベントの起動
+    bindEvents();
 </script>
-    <!-- 現場監督（ミドルエンド）のプログラムを読み込む -->
-    <script src="js/recorder-controller.js"></script>
 </body>
 </html>
