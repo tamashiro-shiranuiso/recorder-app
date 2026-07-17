@@ -4,10 +4,11 @@
  */
 
 // ==========================================
-// 🔧 設定エリア（変更しやすいように一番上に配置）
+// 🔧 設定エリア
 // ==========================================
 const CONFIG = {
-    GAS_URL: "https://script.google.com/macros/s/AKfycbyiV6giy9f3ixmVSU3sGmyDpxGVjecUtxvbtbtAye2mvfvBxcZ9pY7aIQ-QxWIPB8TA/exec",
+    // URLを直接書かず、ブラウザの記憶（LocalStorage）から呼び出す
+    GAS_URL: localStorage.getItem('saved_gas_url') || "",
     MAX_RETRIES: 3,
     STORAGE_KEY: "recorder_app_state"
 };
@@ -43,7 +44,6 @@ class RecorderController {
     }
 
     // --- 部署2: 録音・スライス担当 ---
-    // ※今回はbase64データを受け取る想定にしています
     addAudioChunk(base64Data, index) {
         this.state.chunks.push({
             id: index,
@@ -88,7 +88,7 @@ class RecorderController {
                     await new Promise(res => setTimeout(res, waitTime));
                 }
 
-                // 🔴 GASへ本物のデータ送信（文字起こし依頼）
+                // 🔴 GASへ本物のデータ送信
                 const payload = {
                     action: "transcribe",
                     fileName: `chunk_${this.state.sessionId}_${chunk.id}`,
@@ -98,7 +98,7 @@ class RecorderController {
                 const response = await this.callGasApi(payload);
                 
                 chunk.status = 'completed';
-                chunk.text = response.text; // GASから返ってきたテキストを保存
+                chunk.text = response.text;
                 this.saveState();
                 if(onProgressCallback) onProgressCallback(this.state.chunks);
                 return true;
@@ -117,11 +117,12 @@ class RecorderController {
         }
     }
 
-    // 🔴 GAS通信の共通処理（ここで実際にインターネット越しにGASを叩きます）
     async callGasApi(payload) {
+        if (!this.gasUrl) throw new Error("GASのURLが設定されていません。");
+        
         const response = await fetch(this.gasUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'text/plain' }, // GASのdoPostでCORSエラーを防ぐためtext/plainを指定
+            headers: { 'Content-Type': 'text/plain' },
             body: JSON.stringify(payload)
         });
         
@@ -129,9 +130,8 @@ class RecorderController {
         if (!data.success) {
             throw new Error(data.error || "GAS側で不明なエラーが発生しました");
         }
-        return data.data; // 成功したデータの中身だけを返す
+        return data.data;
     }
-
 
     // --- 部署4: 結合・総仕上げ担当 ---
     async mergeAndCreateMinutes(meetingName, templateType) {
@@ -157,7 +157,6 @@ class RecorderController {
             console.log("✅ 議事録ドキュメント完成: ", response.documentUrl);
         }
 
-        // 処理完了後、日記を消去
         this.clearState();
         return resultData;
     }
@@ -166,5 +165,4 @@ class RecorderController {
 // ==========================================
 // 🚀 現場監督の出勤（インスタンス化）
 // ==========================================
-// グローバル変数として appController を作成し、HTML側から操作できるようにする
 window.appController = new RecorderController(CONFIG);
