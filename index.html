@@ -227,10 +227,10 @@
     // ==========================================
     // 🔧 設定と状態管理（保守性のためのリファクタリング）
     // ==========================================
-    const APP_CONFIG = {
-        CHUNK_INTERVAL_MS: 600000 // 自動スライス間隔（600000 = 10分）。テスト時は 10000 (10秒) などに変更
+        const APP_CONFIG = {
+        // CHUNK_INTERVAL_MS: 600000 // ←本番用（10分）
+        CHUNK_INTERVAL_MS: 10000    // ←テスト用（10秒）に変更！
     };
-
     const AppState = {
         isRecording: false,
         mediaRecorder: null,
