@@ -280,13 +280,15 @@
     // 🔧 設定と状態管理
     // ==========================================
     const APP_CONFIG = {
-        CHUNK_INTERVAL_MS: 10000 // テスト用10秒（本番は 600000）
+        CHUNK_INTERVAL_MS: 10000 // テスト用10秒（本番は 600000 = 10分）
     };
     
     const AppState = {
         isRecording: false,
         mediaRecorder: null,
-        currentChunkIndex: 0
+        currentChunkIndex: 0,
+        audioBlobs: [], // 🌟 蓄積用：すべての音声パーツを貯めておく配列
+        mimeType: 'audio/webm'
     };
 
     const UI = {
@@ -419,12 +421,14 @@
                 options = { mimeType: 'audio/webm' };
                 mimeType = 'audio/webm';
             } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-                options = { mimeType: 'audio/mp4' }; // iPhone / Safari
+                options = { mimeType: 'audio/mp4' };
                 mimeType = 'audio/mp4';
             }
 
+            AppState.mimeType = mimeType;
             AppState.mediaRecorder = new MediaRecorder(stream, options);
             AppState.currentChunkIndex = 0;
+            AppState.audioBlobs = []; // 🌟 音声蓄積配列をリセット
             
             UI.dotsGrid.innerHTML = '';
             if (window.appController) window.appController.state.chunks = [];
@@ -438,8 +442,11 @@
 
             AppState.mediaRecorder.ondataavailable = async (e) => {
                 if (e.data.size > 0 && window.appController) {
+                    // 🌟 1. 裏での統合用に全音声パーツのBlobを配列に蓄積
+                    AppState.audioBlobs.push(e.data);
+
+                    // 2. 文字起こし送信用にBase64に変換して現場監督へ
                     const base64 = await blobToBase64(e.data);
-                    // 🌟 会議名（空欄チェック含む）を渡して、音声パーツと会議名を連動
                     const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
                     window.appController.addAudioChunk(base64, AppState.currentChunkIndex, mimeType, meetingName);
                     
@@ -480,9 +487,15 @@
                 const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
                 const templateType = UI.templateSelect.value;
                 
+                // 🌟 蓄積したすべてのパーツBlobを、1本の綺麗な全体音声Blobに合体！
+                const fullAudioBlob = new Blob(AppState.audioBlobs, { type: AppState.mimeType });
+                const fullAudioBase64 = await blobToBase64(fullAudioBlob);
+
+                // 🚀 現場監督に全体音声データを引き渡して処理開始指示
                 const result = await window.appController.processAllChunks(
                     meetingName, 
                     templateType, 
+                    fullAudioBase64, // 🌟 統合された音声データ
                     updateProgressUI
                 );
                 
@@ -491,17 +504,16 @@
                 UI.statusText.style.color = "#868e96";
                 UI.mainRecordBtn.style.display = "flex";
                 
-                // 🌟 URLポップアップ制御：モード②と③の両方に対応
                 if (result.documentUrl) {
-                    if (confirm("議事録と文字起こしが完成しました！議事録ドキュメントを開きますか？")) {
+                    if (confirm("議事録と統合音声が完成しました！議事録ドキュメントを開きますか？")) {
                         window.open(result.documentUrl, "_blank");
                     }
                 } else if (result.transcriptUrl) {
-                    if (confirm("文字起こしが完成しました！文字起こしドキュメントを開きますか？")) {
+                    if (confirm("文字起こしと統合音声が完成しました！文字起こしドキュメントを開きますか？")) {
                         window.open(result.transcriptUrl, "_blank");
                     }
                 } else {
-                    alert("処理が完了しました！（ドライブの「レコーダー」フォルダを確認してください）");
+                    alert("音声の保存が完了しました！(ドライブの「レコーダー」フォルダを確認してください)");
                 }
 
             } catch (err) {
