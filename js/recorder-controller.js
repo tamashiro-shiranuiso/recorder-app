@@ -7,7 +7,6 @@
 // 🔧 設定エリア
 // ==========================================
 const CONFIG = {
-    // URLを直接書かず、ブラウザの記憶（LocalStorage）から呼び出す
     GAS_URL: localStorage.getItem('saved_gas_url') || "",
     MAX_RETRIES: 3,
     STORAGE_KEY: "recorder_app_state"
@@ -44,10 +43,12 @@ class RecorderController {
     }
 
     // --- 部署2: 録音・スライス担当 ---
-    addAudioChunk(base64Data, index) {
+    // 🌟 端末から検知した mimeType を受け取るように拡張
+    addAudioChunk(base64Data, index, mimeType) {
         this.state.chunks.push({
             id: index,
             base64Data: base64Data, 
+            mimeType: mimeType || 'audio/webm', // 形式を記憶
             status: 'pending',
             text: '',
             retryCount: 0
@@ -60,7 +61,6 @@ class RecorderController {
         console.log("🚀 並列処理を開始します...");
         const pendingChunks = this.state.chunks.filter(c => c.status !== 'completed');
 
-        // 一斉送信（並列処理）
         const promises = pendingChunks.map(chunk => 
             this.sendChunkWithRetry(chunk, onProgressCallback)
         );
@@ -88,11 +88,12 @@ class RecorderController {
                     await new Promise(res => setTimeout(res, waitTime));
                 }
 
-                // 🔴 GASへ本物のデータ送信
+                // 🔴 GASへ送信（形式データも一緒に同梱）
                 const payload = {
                     action: "transcribe",
                     fileName: `chunk_${this.state.sessionId}_${chunk.id}`,
-                    audioData: chunk.base64Data
+                    audioData: chunk.base64Data,
+                    mimeType: chunk.mimeType // 🌟 GASに音声の正体を教えてあげる
                 };
                 
                 const response = await this.callGasApi(payload);
@@ -141,7 +142,6 @@ class RecorderController {
 
         let resultData = { transcript: fullTranscript, documentUrl: null };
 
-        // Step 3 (議事録化) の処理
         if (this.state.mode === '3') {
             console.log("📝 議事録化プロンプトと一緒にGASへ最終送信します...");
             
@@ -162,7 +162,5 @@ class RecorderController {
     }
 }
 
-// ==========================================
-// 🚀 現場監督の出勤（インスタンス化）
-// ==========================================
+// 🚀 現場監督の出勤
 window.appController = new RecorderController(CONFIG);
