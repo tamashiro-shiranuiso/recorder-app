@@ -300,8 +300,7 @@
         isStopping: false,
         recorder: null,            // 🌟 録音セッション中ずっと同じインスタンスを使い続ける
         globalStream: null,
-        chunkIndex: 0,              // 文字起こし用チャンクの通し番号
-        isFirstAudioChunk: true,    // 🌟 音声保存側で「最初の断片か」を管理
+        chunkIndex: 0,              // 文字起こし用・音声保存用チャンクの通し番号
         mimeType: 'audio/webm',
         recordingStartedAt: null,
         elapsedTimerId: null,
@@ -444,7 +443,6 @@
             AppState.isRecording = true;
             AppState.isStopping = false;
             AppState.chunkIndex = 0;
-            AppState.isFirstAudioChunk = true;
             AppState.audioSendQueue = Promise.resolve();
             AppState.recordingStartedAt = Date.now();
 
@@ -497,11 +495,17 @@
     }
 
     // 🌟 ondataavailableで届いた断片を「文字起こし用」「音声保存用」の両方に使う
+    //
+    // 🛠 設計変更：
+    //   以前は「1個目のチャンクだけEBMLヘッダを持つ」という前提のもと、
+    //   GAS側で1本のファイルへ追記していく方式だったが、長時間録音での
+    //   ファイル破損が確認されたため、各チャンクを独立ファイルとして保存し、
+    //   録音終了時にまとめて結合する方式に変更した（詳細はGAS側のコメント参照）。
+    //   そのため、ここでは「最初の断片かどうか」を意識する必要がなくなり、
+    //   チャンク番号（currentIndex）だけを送ればよい。
     function handleDataAvailable(blobPart, mimeType) {
         const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
         const currentIndex = AppState.chunkIndex;
-        const isFirst = AppState.isFirstAudioChunk;
-        AppState.isFirstAudioChunk = false;
         AppState.chunkIndex++;
 
         // UIドットを追加（文字起こし進捗表示用）
@@ -511,6 +515,8 @@
         UI.dotsGrid.appendChild(dot);
 
         // 🌟 送信順序を保証するため、キューに繋げて順番に処理する
+        //   （結合はチャンク番号でソートして行うため厳密な送信順は必須ではないが、
+        //    メモリ上のBlob参照を安全に処理するため直列化を維持している）
         AppState.audioSendQueue = AppState.audioSendQueue.then(async () => {
             const base64 = await blobToBase64(blobPart);
 
@@ -519,11 +525,10 @@
                 window.appController.addTranscribeChunk(base64, currentIndex, mimeType, meetingName);
             }
 
-            // ② 音声本体の追記保存（方式B・新設）
-            //    1個目はヘッダ持ち、2個目以降はヘッダなし継続データという前提のもと、
-            //    GAS側で単純バイト連結すれば正しい1本のwebmになる
+            // ② 音声本体のチャンク保存（設計変更版）
+            //    GAS側で独立ファイルとして保存され、録音終了時に結合される
             if (window.appController) {
-                await window.appController.appendAudioChunk(base64, mimeType, meetingName, isFirst);
+                await window.appController.appendAudioChunk(base64, mimeType, meetingName, currentIndex);
             }
         }).catch(err => {
             console.error("❌ チャンク処理中にエラー:", err);
