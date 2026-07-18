@@ -165,6 +165,76 @@
             margin-top: 8px; font-size: 13px; color: #adb5bd; text-align: center;
         }
 
+        .wake-lock-warning {
+            display: none;
+            margin-top: 16px;
+            padding: 12px 16px;
+            background: #fff9db;
+            border: 1px solid #fab005;
+            border-radius: 12px;
+            font-size: 12px;
+            color: #7c5c00;
+            text-align: center;
+            line-height: 1.6;
+        }
+
+        .wake-lock-note {
+            margin-top: 10px;
+            font-size: 11px;
+            color: #adb5bd;
+            text-align: center;
+            line-height: 1.6;
+        }
+        body.recording-active .wake-lock-note {
+            color: #6a6f78;
+        }
+
+        /* ==========================================
+           🔋 録音中の省電力表示（ダークトーン）
+           Wake Lockで画面を点灯させ続ける分、表示自体の消費電力を
+           抑えるため、録音中は背景を暗いトーンに切り替える。
+           有機ELディスプレイでは黒に近い表示ほど消費電力が下がるため、
+           特にモバイル端末での長時間録音時に効果が期待できる。
+           ========================================== */
+        body.recording-active {
+            background-color: #16181c;
+            transition: background-color 0.4s ease;
+        }
+        body.recording-active .app-container {
+            background-color: #1c1e22;
+            color: #d0d3d8;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+        }
+        body.recording-active .header h2 {
+            color: #e8eaed;
+        }
+        body.recording-active .btn-icon,
+        body.recording-active .btn-pill {
+            background: #2a2d33;
+            color: #d0d3d8;
+            border-color: #3a3d44;
+        }
+        body.recording-active .input-group label {
+            color: #8a8f98;
+        }
+        body.recording-active input[type="text"],
+        body.recording-active select {
+            background-color: #2a2d33;
+            border-color: #3a3d44;
+            color: #d0d3d8;
+        }
+        body.recording-active .status-text {
+            color: #8a8f98;
+        }
+        body.recording-active .progress-container {
+            background-color: #2a2d33;
+        }
+        body.recording-active .wake-lock-warning {
+            background: #3a2f00;
+            border-color: #7c5c00;
+            color: #ffd43b;
+        }
+
         /* ==========================================
            🎨 進捗表示 ＆ パネル群
            ========================================== */
@@ -254,6 +324,14 @@
         <button class="record-btn" id="mainRecordBtn">🎤</button>
         <div class="status-text" id="statusText">タップして録音を開始</div>
         <div class="elapsed-time" id="elapsedTime"></div>
+        <div class="wake-lock-warning" id="wakeLockWarning">
+            ⚠️ 画面がスリープすると録音が中断される可能性があります。<br>
+            録音中は端末をスリープさせないようにしてください。
+        </div>
+        <div class="wake-lock-note">
+            ※ 録音中は、他のアプリへの切り替えや画面ロックを避け、<br>
+            本アプリの画面を表示したままにしてください。
+        </div>
     </div>
 
     <div class="progress-container" id="progressContainer">
@@ -304,6 +382,8 @@
         mimeType: 'audio/webm',
         recordingStartedAt: null,
         elapsedTimerId: null,
+        wakeLock: null,              // 🌟 追加：画面スリープ防止用のWake Lockオブジェクト
+        wakeLockSupported: 'wakeLock' in navigator,  // 🌟 追加：端末がWake Lock APIに対応しているか
         // 🌟 追加：appendAudioChunkの送信を順番通りに実行するためのキュー
         //   （ondataavailableは発火順が保証されるが、非同期送信が追い越さないようにする）
         audioSendQueue: Promise.resolve()
@@ -318,6 +398,7 @@
         mainRecordBtn: document.getElementById('mainRecordBtn'),
         statusText: document.getElementById('statusText'),
         elapsedTime: document.getElementById('elapsedTime'),
+        wakeLockWarning: document.getElementById('wakeLockWarning'),
         progressContainer: document.getElementById('progressContainer'),
         dotsGrid: document.getElementById('dotsGrid'),
         progressTitle: document.getElementById('progressTitle'),
@@ -412,8 +493,81 @@
     }
 
     // ==========================================
-    // 🎤 メイン録音・通信ロジック（方式B）
+    // 🔆 画面スリープ防止（Wake Lock API）
+    //
+    // 🛠 背景：
+    //   スマホ等で長時間会議を録音する場合、画面が自動消灯（スリープ）すると、
+    //   ブラウザがバックグラウンド扱いになり MediaRecorder の動作が
+    //   スロットリングされたり停止したりするリスクがある。
+    //   Wake Lock API を使うことで、録音中は画面がスリープに入らないよう
+    //   明示的にロックする。
+    //
+    // 🔋 バッテリー消耗への配慮：
+    //   Wake Lockは「画面を明るく光らせ続ける」ものではなく、あくまで
+    //   「スリープ（自動消灯）させない」ためのものなので、OS側の
+    //   自動輝度調整機能（暗所での減光等）は引き続き有効に働く。
+    //   それでも「常時点灯」自体はバッテリーを消費するため、本アプリでは
+    //   録音中の画面をあえて暗いダークトーンの配色に切り替え、
+    //   表示による消費電力を抑える工夫を加えている（.recording-dark-mode参照）。
+    //
+    // ⚠️ 対応していない環境（一部のブラウザ・OS）や、Wake Lockが取得できな
+    //   かった場合は、ユーザーに対して「スリープさせないでください」という
+    //   注意喚起を表示することで補う。
     // ==========================================
+    async function requestWakeLock() {
+        if (!AppState.wakeLockSupported) {
+            console.warn("⚠️ この端末・ブラウザはWake Lock APIに対応していません。");
+            showWakeLockWarning();
+            return;
+        }
+
+        try {
+            AppState.wakeLock = await navigator.wakeLock.request('screen');
+            console.log("🔆 Wake Lock取得成功：画面スリープを防止します。");
+            hideWakeLockWarning();
+
+            // 🌟 Wake Lockは、タブが非表示になったりOSに強制解除されたりすると
+            //   自動的に失われることがある。解除されたことを検知できるようにする。
+            AppState.wakeLock.addEventListener('release', () => {
+                console.warn("⚠️ Wake Lockが解除されました（システムにより自動解除された可能性があります）。");
+                // 録音継続中であれば、再表示可能になったタイミングで再取得を試みる
+                if (AppState.isRecording) {
+                    showWakeLockWarning();
+                }
+            });
+        } catch (err) {
+            console.warn("⚠️ Wake Lockの取得に失敗しました:", err);
+            showWakeLockWarning();
+        }
+    }
+
+    function releaseWakeLock() {
+        if (AppState.wakeLock) {
+            AppState.wakeLock.release().catch(() => {});
+            AppState.wakeLock = null;
+            console.log("🔆 Wake Lockを解放しました。");
+        }
+        hideWakeLockWarning();
+    }
+
+    // 🌟 タブが再びアクティブになった際、Wake Lockが失われていたら再取得を試みる
+    //   （画面ロック解除・タブ切り替え復帰時などに有効）
+    document.addEventListener('visibilitychange', async () => {
+        if (document.visibilityState === 'visible' && AppState.isRecording && !AppState.wakeLock) {
+            console.log("🔆 画面が再アクティブ化されました。Wake Lockの再取得を試みます。");
+            await requestWakeLock();
+        }
+    });
+
+    function showWakeLockWarning() {
+        if (!AppState.isRecording) return;
+        UI.wakeLockWarning.style.display = "block";
+    }
+    function hideWakeLockWarning() {
+        UI.wakeLockWarning.style.display = "none";
+    }
+
+
     async function handleRecordButtonClick() {
         if (!window.appController || !window.appController.gasUrl) {
             alert("初回設定が必要です！\n右上の「⚙️設定」ボタンから、GASウェブアプリのURLを登録してください。");
@@ -454,6 +608,12 @@
             UI.statusText.style.color = "#fa5252";
             UI.progressContainer.style.display = "none";
 
+            // 🌟 録音中は省電力ダークトーンに切り替え（Wake Lockでの常時点灯に対する消費電力対策）
+            document.body.classList.add('recording-active');
+
+            // 🌟 画面スリープ防止を試みる（失敗した場合は警告表示で補う）
+            await requestWakeLock();
+
             startElapsedTimeDisplay();
 
             // 端末の対応フォーマット自動判定
@@ -482,6 +642,30 @@
                 if (typeof AppState._onRecorderStopped === 'function') {
                     AppState._onRecorderStopped();
                 }
+            };
+
+            // 🌟 追加：録音異常終了の検知（画面スリープ・OSによる強制中断等）
+            //   MediaRecorderがエラーで停止した場合、ユーザーが気づかないまま
+            //   「録音中の表示のまま実際は止まっている」状態になるのを防ぐため、
+            //   即座に画面に警告を出す。
+            //   ※ これが発生した時点までのチャンクは、既にGAS側へ個別保存
+            //     済みのため失われない（設計上の安全策）。ユーザーには
+            //     録音の再開を促す。
+            recorder.onerror = (event) => {
+                console.error("❌ MediaRecorderでエラーが発生しました:", event.error);
+                UI.statusText.innerHTML = "⚠️ 録音が中断されました（スリープ等の可能性）。もう一度録音を開始してください。";
+                UI.statusText.style.color = "#fa5252";
+                AppState.isRecording = false;
+                stopElapsedTimeDisplay();
+                releaseWakeLock();
+                document.body.classList.remove('recording-active');
+                UI.mainRecordBtn.classList.remove('recording');
+                UI.mainRecordBtn.innerHTML = "🎤";
+                UI.mainRecordBtn.disabled = false;
+                alert(
+                    "録音が予期せず中断されました。画面スリープや他アプリへの切り替えが原因の可能性があります。\n" +
+                    "これまでに録音できた部分は保存されていますが、続きを録音する場合は「録音開始」を押して新しく録音を始めてください。"
+                );
             };
 
             // 🌟 timesliceを指定して開始。これにより同一インスタンスのまま
@@ -540,6 +724,10 @@
         AppState.isStopping = true;
         AppState.isRecording = false;
         stopElapsedTimeDisplay();
+
+        // 🌟 録音終了時にWake Lockを解放し、省電力ダークトーン表示も解除する
+        releaseWakeLock();
+        document.body.classList.remove('recording-active');
 
         UI.mainRecordBtn.disabled = true;
         UI.mainRecordBtn.classList.remove('recording');
@@ -611,6 +799,10 @@
             UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
             UI.statusText.style.color = "#fa5252";
         } finally {
+            // 🌟 念のための保険：異常終了時もWake Lock・ダークトーンを確実に解除する
+            releaseWakeLock();
+            document.body.classList.remove('recording-active');
+
             UI.mainRecordBtn.style.display = "flex";
             UI.mainRecordBtn.disabled = false;
             AppState.isStopping = false;
