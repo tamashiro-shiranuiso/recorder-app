@@ -96,18 +96,19 @@ class RecorderController {
         this.saveState();
     }
 
-    // --- 部署2': 音声本体の追記保存担当（方式B・新設） ---
-    // timeslice方式で録音中に定期的に出てくる音声断片を、GASの一時ファイルへ随時送信する。
-    // これは「保存」であり「文字起こし」とは独立した処理のため、await不要でも呼べるが、
-    // 送信順序が結合順序に直結するため、呼び出し側は必ず順番を守って await すること。
-    async appendAudioChunk(base64Data, mimeType, meetingName, isFirstChunk) {
+    // --- 部署2': 音声本体の保存担当（設計変更版） ---
+    // timeslice方式で録音中に定期的に出てくる音声断片を、GASへ独立したチャンクとして送信する。
+    // 各チャンクはGAS側で個別ファイルとして保存され、最後に一括結合される
+    // （追記方式ではないため、送信順序を厳密に守る必要は結合時のソートで担保されるが、
+    //   chunkIndexの採番自体は呼び出し側で順番通りに行うこと）。
+    async appendAudioChunk(base64Data, mimeType, meetingName, chunkIndex) {
         const payload = {
             action: "appendAudioChunk",
             sessionId: this.state.sessionId,
             audioData: base64Data,
             mimeType: mimeType || 'audio/webm',
             meetingName: meetingName || "無題の会議",
-            isFirstChunk: !!isFirstChunk
+            chunkIndex: chunkIndex
         };
 
         // 🌟 音声保存はリトライしつつ行うが、失敗しても録音継続は妨げない
@@ -117,19 +118,19 @@ class RecorderController {
             try {
                 if (attempt > 0) {
                     const waitTime = Math.pow(2, attempt) * 1000;
-                    console.warn(`⚠️ 音声追記保存: ${waitTime / 1000}秒待機して再送します...`);
+                    console.warn(`⚠️ 音声チャンク保存: ${waitTime / 1000}秒待機して再送します...`);
                     await new Promise(res => setTimeout(res, waitTime));
                 }
                 await this.callGasApi(payload);
                 return true;
             } catch (error) {
                 lastError = error;
-                console.error(`❌ 音声追記保存エラー (${attempt + 1}回目)`, error);
+                console.error(`❌ 音声チャンク保存エラー (${attempt + 1}回目)`, error);
             }
         }
 
         // 🌟 全リトライ失敗 → 記録だけ残し、ユーザーには最終的に警告する
-        this.audioAppendFailures.push({ isFirstChunk, error: lastError ? lastError.message : "unknown" });
+        this.audioAppendFailures.push({ chunkIndex, error: lastError ? lastError.message : "unknown" });
         return false;
     }
 
