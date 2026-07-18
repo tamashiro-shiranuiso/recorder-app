@@ -236,6 +236,56 @@
         }
 
         /* ==========================================
+           🌑 疑似スリープオーバーレイ
+           実際のOSスリープはWake Lockでキャンセルし続けつつ、
+           一定時間操作がなければ画面をほぼ黒くフェードさせることで、
+           見た目上は消灯したように見せ、体感的な省電力感を出す。
+           有機ELディスプレイでは黒表示に近いほど実消費電力も下がる。
+           タップすると即座に解除される。
+           ========================================== */
+        .pseudo-sleep-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #000000;
+            opacity: 0;
+            pointer-events: none;
+            z-index: 9999;
+            transition: opacity 2.5s ease;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .pseudo-sleep-overlay.active {
+            opacity: 0.97;
+            pointer-events: auto;
+        }
+        .pseudo-sleep-overlay .sleep-indicator {
+            color: #3a3d44;
+            font-size: 13px;
+            text-align: center;
+            line-height: 1.8;
+            opacity: 0;
+            transition: opacity 2.5s ease 0.5s;
+        }
+        .pseudo-sleep-overlay.active .sleep-indicator {
+            opacity: 1;
+        }
+        .pseudo-sleep-overlay .sleep-rec-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #7a2020;
+            margin-right: 6px;
+            animation: sleepPulse 3s infinite;
+        }
+        @keyframes sleepPulse {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 0.9; }
+        }
+
+        /* ==========================================
            🎨 進捗表示 ＆ パネル群
            ========================================== */
         .progress-container {
@@ -357,6 +407,15 @@
     </div>
 </div>
 
+<!-- 🌑 疑似スリープオーバーレイ：録音中、一定時間操作がないと表示される -->
+<div class="pseudo-sleep-overlay" id="pseudoSleepOverlay">
+    <div class="sleep-indicator">
+        <span class="sleep-rec-dot"></span>録音中<br>
+        <span id="sleepOverlayElapsed"></span><br>
+        画面をタップすると表示が戻ります
+    </div>
+</div>
+
 <!-- キャッシュ強制回避用のバージョン記述を追加(v=3.0 方式B対応版) -->
 <script src="js/recorder-controller.js?v=3.0"></script>
 
@@ -370,7 +429,8 @@
     //   ・1個目の断片だけがEBMLヘッダを持ち、以降は継続クラスタデータのみになるため、
     //     順番通りGASへ送って追記保存すれば、最終的に正しい1本のwebmになる
     const APP_CONFIG = {
-        CHUNK_INTERVAL_MS: 600000 // 本番運用: 10分（テストする場合は短い値に変更してください）
+        CHUNK_INTERVAL_MS: 600000, // 本番運用: 10分（テストする場合は短い値に変更してください）
+        PSEUDO_SLEEP_DELAY_MS: 15000 // 🌟 追加：録音中、操作がないままこの時間が経つと疑似スリープ表示になる
     };
 
     const AppState = {
@@ -384,6 +444,8 @@
         elapsedTimerId: null,
         wakeLock: null,              // 🌟 追加：画面スリープ防止用のWake Lockオブジェクト
         wakeLockSupported: 'wakeLock' in navigator,  // 🌟 追加：端末がWake Lock APIに対応しているか
+        pseudoSleepTimerId: null,    // 🌟 追加：疑似スリープ発動までの無操作タイマー
+        isPseudoSleeping: false,     // 🌟 追加：現在疑似スリープ表示中かどうか
         // 🌟 追加：appendAudioChunkの送信を順番通りに実行するためのキュー
         //   （ondataavailableは発火順が保証されるが、非同期送信が追い越さないようにする）
         audioSendQueue: Promise.resolve()
@@ -399,6 +461,8 @@
         statusText: document.getElementById('statusText'),
         elapsedTime: document.getElementById('elapsedTime'),
         wakeLockWarning: document.getElementById('wakeLockWarning'),
+        pseudoSleepOverlay: document.getElementById('pseudoSleepOverlay'),
+        sleepOverlayElapsed: document.getElementById('sleepOverlayElapsed'),
         progressContainer: document.getElementById('progressContainer'),
         dotsGrid: document.getElementById('dotsGrid'),
         progressTitle: document.getElementById('progressTitle'),
@@ -567,6 +631,81 @@
         UI.wakeLockWarning.style.display = "none";
     }
 
+    // ==========================================
+    // 🌑 疑似スリープ表示の制御
+    //
+    // 🛠 目的：
+    //   Wake Lockで実際のOSスリープはキャンセルし続けている（＝画面は
+    //   点灯したまま）ため、何もしないと録音中は常に明るい画面が
+    //   表示され続け、バッテリーを消費する。
+    //   そこで、一定時間（PSEUDO_SLEEP_DELAY_MS）操作がなければ、
+    //   画面をほぼ黒いオーバーレイで覆い、見た目上は消灯したように
+    //   見せる。実際のスリープには入っていないため、MediaRecorderの
+    //   動作には影響しない。
+    //
+    // 🔆 解除：
+    //   画面のどこかをタップ・クリックすれば即座に解除され、
+    //   同時にタイマーがリセットされて、また無操作状態が続けば
+    //   再度フェードアウトしていく。
+    // ==========================================
+    function resetPseudoSleepTimer() {
+        if (AppState.pseudoSleepTimerId) {
+            clearTimeout(AppState.pseudoSleepTimerId);
+            AppState.pseudoSleepTimerId = null;
+        }
+
+        // 疑似スリープ中であれば即座に解除する
+        if (AppState.isPseudoSleeping) {
+            wakePseudoSleep();
+        }
+
+        // 録音中でなければタイマー自体をセットしない
+        if (!AppState.isRecording) return;
+
+        AppState.pseudoSleepTimerId = setTimeout(() => {
+            enterPseudoSleep();
+        }, APP_CONFIG.PSEUDO_SLEEP_DELAY_MS);
+    }
+
+    function enterPseudoSleep() {
+        if (!AppState.isRecording) return;
+        AppState.isPseudoSleeping = true;
+        updateSleepOverlayElapsedText();
+        UI.pseudoSleepOverlay.classList.add('active');
+        console.log("🌑 疑似スリープ表示に入りました（実際のスリープはWake Lockで防止中）。");
+    }
+
+    function wakePseudoSleep() {
+        AppState.isPseudoSleeping = false;
+        UI.pseudoSleepOverlay.classList.remove('active');
+    }
+
+    function stopPseudoSleepCycle() {
+        if (AppState.pseudoSleepTimerId) {
+            clearTimeout(AppState.pseudoSleepTimerId);
+            AppState.pseudoSleepTimerId = null;
+        }
+        wakePseudoSleep();
+    }
+
+    function updateSleepOverlayElapsedText() {
+        if (!AppState.recordingStartedAt) return;
+        const sec = Math.floor((Date.now() - AppState.recordingStartedAt) / 1000);
+        const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+        const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+        const s = String(sec % 60).padStart(2, '0');
+        UI.sleepOverlayElapsed.textContent = `${h}:${m}:${s}`;
+    }
+
+    // 🌟 画面のどこをタップ/クリックしても疑似スリープを解除し、タイマーをリセットする
+    ['click', 'touchstart', 'keydown'].forEach(eventName => {
+        document.addEventListener(eventName, () => {
+            if (AppState.isRecording) {
+                resetPseudoSleepTimer();
+            }
+        }, { passive: true });
+    });
+
 
     async function handleRecordButtonClick() {
         if (!window.appController || !window.appController.gasUrl) {
@@ -614,6 +753,9 @@
             // 🌟 画面スリープ防止を試みる（失敗した場合は警告表示で補う）
             await requestWakeLock();
 
+            // 🌟 疑似スリープタイマーを起動（操作がないまま一定時間経つと画面を暗くする）
+            resetPseudoSleepTimer();
+
             startElapsedTimeDisplay();
 
             // 端末の対応フォーマット自動判定
@@ -657,6 +799,7 @@
                 UI.statusText.style.color = "#fa5252";
                 AppState.isRecording = false;
                 stopElapsedTimeDisplay();
+                stopPseudoSleepCycle();
                 releaseWakeLock();
                 document.body.classList.remove('recording-active');
                 UI.mainRecordBtn.classList.remove('recording');
@@ -724,6 +867,7 @@
         AppState.isStopping = true;
         AppState.isRecording = false;
         stopElapsedTimeDisplay();
+        stopPseudoSleepCycle();
 
         // 🌟 録音終了時にWake Lockを解放し、省電力ダークトーン表示も解除する
         releaseWakeLock();
@@ -799,7 +943,8 @@
             UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
             UI.statusText.style.color = "#fa5252";
         } finally {
-            // 🌟 念のための保険：異常終了時もWake Lock・ダークトーンを確実に解除する
+            // 🌟 念のための保険：異常終了時もWake Lock・ダークトーン・疑似スリープを確実に解除する
+            stopPseudoSleepCycle();
             releaseWakeLock();
             document.body.classList.remove('recording-active');
 
@@ -854,6 +999,11 @@
         const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
         const s = String(sec % 60).padStart(2, '0');
         UI.elapsedTime.textContent = `経過時間 ${h}:${m}:${s}`;
+
+        // 🌟 疑似スリープ表示中も経過時間だけは薄く更新し続ける
+        if (AppState.isPseudoSleeping) {
+            updateSleepOverlayElapsedText();
+        }
     }
 
     function blobToBase64(blob) {
