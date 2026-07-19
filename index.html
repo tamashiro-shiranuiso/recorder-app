@@ -416,8 +416,8 @@
     </div>
 </div>
 
-<!-- キャッシュ強制回避用のバージョン記述を追加(v=3.0 方式B対応版) -->
-<script src="js/recorder-controller.js?v=3.0"></script>
+<!-- キャッシュ強制回避用のバージョン記述を追加(v=4.0 音声優先確定対応版) -->
+<script src="js/recorder-controller.js?v=4.0"></script>
 
 <script>
     // ==========================================
@@ -566,6 +566,15 @@
     //   Wake Lock API を使うことで、録音中は画面がスリープに入らないよう
     //   明示的にロックする。
     //
+    // 🛠 変更点（音声優先確定対応）：
+    //   従来はrequestWakeLock()を録音開始時、releaseWakeLock()を
+    //   「録音停止直後・文字起こし開始前」に呼んでいたが、これだと
+    //   「AIによる変換中」の間はWake Lockの保護対象外になっており、
+    //   このフェーズでスリープすると通信が中断される問題があった。
+    //   対策として、releaseWakeLock()の呼び出しタイミングを
+    //   「音声の確定保存が完了した後」まで遅らせるようにした
+    //   （stopRecordingAndProcess関数を参照）。
+    //
     // 🔋 バッテリー消耗への配慮：
     //   Wake Lockは「画面を明るく光らせ続ける」ものではなく、あくまで
     //   「スリープ（自動消灯）させない」ためのものなので、OS側の
@@ -594,8 +603,9 @@
             //   自動的に失われることがある。解除されたことを検知できるようにする。
             AppState.wakeLock.addEventListener('release', () => {
                 console.warn("⚠️ Wake Lockが解除されました（システムにより自動解除された可能性があります）。");
-                // 録音継続中であれば、再表示可能になったタイミングで再取得を試みる
-                if (AppState.isRecording) {
+                // 録音継続中、または録音停止後の確定処理中であれば、
+                // 再表示可能になったタイミングで再取得を試みる
+                if (AppState.isRecording || AppState.isStopping) {
                     showWakeLockWarning();
                 }
             });
@@ -616,15 +626,18 @@
 
     // 🌟 タブが再びアクティブになった際、Wake Lockが失われていたら再取得を試みる
     //   （画面ロック解除・タブ切り替え復帰時などに有効）
+    //   🛠 変更点：録音中だけでなく、録音停止後の確定処理中（isStopping）も対象に含めた。
+    //     「AIによる変換中」表示のタイミングでスリープ→復帰した場合にも
+    //     Wake Lockを再取得できるようにするため。
     document.addEventListener('visibilitychange', async () => {
-        if (document.visibilityState === 'visible' && AppState.isRecording && !AppState.wakeLock) {
+        if (document.visibilityState === 'visible' && (AppState.isRecording || AppState.isStopping) && !AppState.wakeLock) {
             console.log("🔆 画面が再アクティブ化されました。Wake Lockの再取得を試みます。");
             await requestWakeLock();
         }
     });
 
     function showWakeLockWarning() {
-        if (!AppState.isRecording) return;
+        if (!AppState.isRecording && !AppState.isStopping) return;
         UI.wakeLockWarning.style.display = "block";
     }
     function hideWakeLockWarning() {
@@ -862,6 +875,22 @@
         });
     }
 
+    // ==========================================
+    // 🌟 変更点（音声優先確定対応）：
+    //   録音停止後の処理順序を、
+    //     ① 音声の1本化・確定保存（最優先） → ② 文字起こし → ③ 議事録生成
+    //   の順に変更した。
+    //
+    //   ねらい：
+    //   文字起こし・議事録生成の途中でスマホがスリープ→通信断・エラーに
+    //   なっても、「音声さえ確保できていれば他の方法で議事録化できる」
+    //   という運用方針を成立させるため、音声の確定保存を最優先で完了させる。
+    //
+    //   また、Wake Lockの解放（releaseWakeLock）を、従来の「録音停止直後」
+    //   から「音声確定処理が終わった後」に移動した。これにより、
+    //   「AIによる変換中」の表示中（＝実際には音声確定〜文字起こしの通信中）
+    //   にスマホがスリープしてしまうリスクを大きく減らす。
+    // ==========================================
     async function stopRecordingAndProcess() {
         if (AppState.isStopping) return;
         AppState.isStopping = true;
@@ -869,8 +898,10 @@
         stopElapsedTimeDisplay();
         stopPseudoSleepCycle();
 
-        // 🌟 録音終了時にWake Lockを解放し、省電力ダークトーン表示も解除する
-        releaseWakeLock();
+        // 🌟 変更点：Wake Lockはこの時点ではまだ解放しない。
+        //   「音声の確定保存」が終わるまではスリープを防ぎ続けたいため、
+        //   解放タイミングを音声確定処理の後ろ（finally節）へ移動した。
+        //   （ダークトーン表示は録音中の見た目のためのものなので、ここで解除してよい）
         document.body.classList.remove('recording-active');
 
         UI.mainRecordBtn.disabled = true;
@@ -895,17 +926,49 @@
             UI.statusText.innerHTML = "✨ 最後の音声データを保存中...";
             await AppState.audioSendQueue;
 
-            UI.statusText.innerHTML = "✨ AIが文字起こし中...";
-            UI.progressContainer.style.display = "block";
-            UI.progressTitle.innerHTML = "AIが音声を処理中...";
-
             if (!window.appController) throw new Error("現場監督のプログラムが読み込まれていません。");
 
             const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
             const templateType = UI.templateSelect.value;
 
-            // 🌟 方式Bの利点：ここで巨大な音声Blobを再送信する必要がない
-            //   （録音中に既にGAS側の一時ファイルへ保存済みのため）
+            // ==========================================
+            // 🌟 最優先ステップ（音声優先確定対応）：
+            //   文字起こし・議事録生成より先に、音声だけを1本のファイルとして
+            //   必ず確定させる。
+            //   これにより、この後の文字起こし処理でエラーが起きても、
+            //   録音した音声そのものは既にドライブへ確定保存済みとなるため、
+            //   別の方法・別のタイミングで議事録化する道が残る。
+            // ==========================================
+            UI.statusText.innerHTML = "🔊 音声データを1本にまとめています...";
+            UI.progressContainer.style.display = "block";
+            UI.progressTitle.innerHTML = "音声データを確定保存中...";
+
+            let audioResult = null;
+            try {
+                audioResult = await window.appController.finalizeAudioAndGetResult(meetingName);
+                console.log("🔊 音声確定結果:", audioResult);
+            } catch (audioErr) {
+                // 🌟 音声確定に失敗した場合は、ここで処理を止めてユーザーに知らせる。
+                //   文字起こしへ進んでも「音声さえ確保する」という最優先の目的を
+                //   達成できていないため、明確にエラーとして扱う。
+                console.error("❌ 音声確定処理が失敗しました:", audioErr);
+                UI.progressTitle.innerHTML = "⚠️ 音声の確定保存に失敗しました";
+                UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
+                UI.statusText.style.color = "#fa5252";
+                alert(
+                    "音声データの確定保存に失敗しました。\n" +
+                    "録音のチャンク自体はドライブの「レコーダー/_一時録音中」フォルダに残っている" +
+                    "可能性がありますので、手動でご確認ください。\n\n詳細: " + audioErr.message
+                );
+                return; // 🌟 音声確定に失敗した場合、文字起こしには進まない
+            }
+
+            // 🌟 ここまで来た時点で、音声は既に確定済み（最優先事項は達成済み）。
+            //   ここから先の文字起こし・議事録生成でエラーが起きても、
+            //   音声データ自体は失われない。
+            UI.progressTitle.innerHTML = "🎉 音声データの保存が完了しました！";
+            UI.statusText.innerHTML = "✨ 続けてAIが文字起こし中...";
+
             const result = await window.appController.processAllChunks(
                 meetingName,
                 templateType,
@@ -914,6 +977,11 @@
 
             if (!result) {
                 console.warn("⚠️ processAllChunksがスキップされました（多重実行防止）。");
+                // 🌟 文字起こしはスキップされたが、音声は既に確定済みなのでその旨を伝える
+                UI.progressTitle.innerHTML = "🔊 音声データの保存は完了しています";
+                UI.statusText.innerHTML = "タップして新しい録音を開始";
+                UI.statusText.style.color = "#868e96";
+                UI.mainRecordBtn.style.display = "flex";
                 return;
             }
 
@@ -939,11 +1007,15 @@
             }
 
         } catch (err) {
-            alert("エラーが発生しました: " + err.message);
+            // 🌟 このcatchに到達するのは「音声確定は成功したが、それ以降で
+            //   想定外の例外が起きた」ケース（音声確定自体の失敗は上のtry/catchで
+            //   個別に処理済みのため、ここには来ない）。
+            alert("エラーが発生しました: " + err.message + "\n（音声データは既に確定保存されている可能性があります）");
             UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
             UI.statusText.style.color = "#fa5252";
         } finally {
             // 🌟 念のための保険：異常終了時もWake Lock・ダークトーン・疑似スリープを確実に解除する
+            //   （音声確定・文字起こしいずれの段階で終わっても、ここで確実にスリープ防止を解除する）
             stopPseudoSleepCycle();
             releaseWakeLock();
             document.body.classList.remove('recording-active');
