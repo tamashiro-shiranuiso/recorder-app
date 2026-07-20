@@ -20,13 +20,36 @@
  *   でしかないため、これを単体でGeminiに渡すと、Geminiが不完全な音声を
  *   無理に解釈しようとし、「同一発言の重複」「文脈の破綻」といった
  *   誤った文字起こし結果を生む不具合が実際に確認された。
- * ・対策として、文字起こしは「録音停止後に音声結合（finalizeAudio）で
- *   確定した、1本の正しいWebMファイル」に対して行う方式に統一した。
- *   これにより、音声保存側（appendAudioChunk）と文字起こし側の設計が
- *   矛盾なく揃った。
- * ・addTranscribeChunk / processAllChunks / sendChunkWithRetry は、
- *   後方互換のためコードとしては残しているが、通常フローからは
- *   呼び出さない（呼び出し箇所はHTML側から削除済み）。
+ *
+ * 🛠 2時間超の長時間録音への抜本対応（逐次アップロード方式）：
+ * ・GASのBlobサイズ上限（約50MB）、およびGASの実行時間制限（6分）という
+ *   2つの制約により、「音声を1本に結合してから文字起こしする」方式は
+ *   長時間録音では破綻する（GASのメモリ枯渇、または6分タイムアウト）。
+ * ・対策として、フロント側は「timesliceによる分割」をやめ、10分ごとに
+ *   MediaRecorderを「完全停止→即再開」する方式に変更した。これにより
+ *   すべてのチャンクが「正しいヘッダーを持つ、完全で独立した1本の
+ *   WebMファイル」として生成される。
+ * ・各チャンクは、生成された直後に非同期でGASへ送信し、Gemini File API
+ *   へアップロードする（uploadChunkToGemini）。返ってきたfileUriは
+ *   localStorageに配列として蓄積する（geminiFileUris）。
+ * ・録音終了時は、重い音声データを一切送らず、蓄積されたfileUriの配列
+ *   だけをGASへ渡して文字起こしを行う（transcribeFromMultipleFiles）。
+ *   この処理はfileUriを参照するだけなので高速に完了し、GASの6分制限に
+ *   余裕を持って収まる。
+ * ・音声のDrive保存（appendAudioChunk/finalizeAudio）とGeminiアップロード
+ *   （uploadChunkToGemini）は、目的が異なるため両方並行して行う：
+ *     - Drive保存: 人間が後で聞き直すための「永続的な原本バックアップ」
+ *     - Geminiアップロード: AIに文字起こしさせるための「一時的な計算用
+ *       リソース」（48時間で自動失効）
+ * ・fileUri配列がlocalStorageに永続化されているため、スリープ等で
+ *   アプリが一時的に落ちても「重い音声の再アップロード」というボトル
+ *   ネックをスキップして、即座に文字起こしから再開できる
+ *   （「お助けモード」との統合）。
+ *
+ * ・addTranscribeChunk / processAllChunks / sendChunkWithRetry /
+ *   transcribeFinalizedAudio は、後方互換のためコードとしては残して
+ *   いるが、通常フローからは呼び出さない（呼び出し箇所はHTML側から
+ *   削除済み）。
  */
 
 const CONFIG = {
@@ -67,12 +90,25 @@ class RecorderController {
             audioFinalized: false,
             audioUrl: null,
             // 🌟 追加：確定済み音声ファイルのDriveファイルID。
-            //   文字起こしは、チャンク単位ではなくこのファイルIDを使って
-            //   1本のファイルに対して行う（バグ修正・方式変更）。
+            //   お助けモード（緊急再開）専用。通常フローでは使わない。
             audioFileId: null,
             // 🌟 追加：録音時に使われたmimeType（appendAudioChunk時に記録される）。
             //   finalizeAudio呼び出し時に使う。
-            mimeType: null
+            mimeType: null,
+            // 🌟 新設（逐次アップロード方式）：
+            //   録音中、10分ごとに確定したチャンクをGemini File APIへ
+            //   アップロードした結果得られる fileUri を、順番通り配列で
+            //   蓄積する。文字起こしは最終的にこの配列をまとめてGASへ
+            //   渡すことで行う（重い音声データは二度と送らない）。
+            //   localStorageに永続化されるため、アプリが落ちても
+            //   このURI配列さえ残っていれば「重い音声の再アップロード」
+            //   をスキップして即座に文字起こしから再開できる。
+            geminiFileUris: [],
+            // 🌟 新設：Geminiアップロードに失敗したチャンクの記録。
+            //   Drive保存（appendAudioChunk）と異なり、こちらが失敗すると
+            //   最終的な文字起こしにそのチャンクの内容が含まれなくなる
+            //   ため、録音終了時にユーザーへ明示的に警告する。
+            geminiUploadFailures: []
         };
     }
 
@@ -138,11 +174,11 @@ class RecorderController {
         this.saveState();
     }
 
-    // --- 部署2': 音声本体の保存担当（設計変更版） ---
-    // timeslice方式で録音中に定期的に出てくる音声断片を、GASへ独立したチャンクとして送信する。
-    // 各チャンクはGAS側で個別ファイルとして保存され、最後に一括結合される
-    // （追記方式ではないため、送信順序を厳密に守る必要は結合時のソートで担保されるが、
-    //   chunkIndexの採番自体は呼び出し側で順番通りに行うこと）。
+    // --- 部署2': 音声本体の保存担当（Drive永続バックアップ用） ---
+    // 🛠 2時間超対応版：10分ごとに「完全停止→即再開」で確定した、
+    //   ヘッダー付きの完全な1本のWebMファイルを、そのままGASへ送信する。
+    //   各チャンクはGAS側で個別ファイルとして保存され、録音終了時に
+    //   一括結合される（人間が後で聞き直すための永続バックアップが目的）。
     async appendAudioChunk(base64Data, mimeType, meetingName, chunkIndex) {
         // 🌟 音声結合時（finalizeAudio）に必要になるmimeTypeを、
         //   ここでstateに記録しておく（従来はchunks配列から拾っていたが、
@@ -180,6 +216,68 @@ class RecorderController {
 
         // 🌟 全リトライ失敗 → 記録だけ残し、ユーザーには最終的に警告する
         this.audioAppendFailures.push({ chunkIndex, error: lastError ? lastError.message : "unknown" });
+        return false;
+    }
+
+    // ==========================================
+    // 🌟 新設（2時間超対応・逐次アップロード方式）：
+    //   10分ごとに確定したチャンクを、その都度Gemini File APIへ
+    //   アップロードする。返ってきたfileUriは、正しい順序（chunkIndex順）
+    //   でstate.geminiFileUrisに記録し、localStorageへ永続化する。
+    //
+    // 🛡️ 順序の保証：
+    //   appendAudioChunk（Drive保存）と同様、非同期処理が複数同時に
+    //   走ってもURIの並び順が崩れないよう、chunkIndexをキーにした
+    //   オブジェクトへ一旦格納し、最終的に読み出す際にindexでソートする。
+    //   （呼び出し元でキューによる直列化も行っているため、通常は
+    //    順不同で完了することはないが、二重の安全策として順序保証を持たせる）
+    //
+    // ⚠️ 失敗時の扱い：
+    //   Drive保存と違い、こちらが失敗すると「そのチャンクの内容が
+    //   最終的な文字起こしに含まれない」という直接的な影響がある。
+    //   そのため、失敗はgeminiUploadFailuresに記録し、録音終了時に
+    //   ユーザーへ明示的に警告する（Drive上の音声原本は別途残っている
+    //   ため、内容自体が完全に失われるわけではない）。
+    // ==========================================
+    async uploadChunkToGeminiAndStore(base64Data, mimeType, chunkIndex) {
+        const payload = {
+            action: "uploadChunkToGemini",
+            audioData: base64Data,
+            mimeType: mimeType || 'audio/webm',
+            chunkIndex: chunkIndex
+        };
+
+        let lastError = null;
+        for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+            try {
+                if (attempt > 0) {
+                    const waitTime = Math.pow(2, attempt) * 1000;
+                    console.warn(`⚠️ Geminiアップロード: ${waitTime / 1000}秒待機して再送します...（チャンク${chunkIndex}）`);
+                    await new Promise(res => setTimeout(res, waitTime));
+                }
+                const response = await this.callGasApi(payload);
+
+                // 🌟 chunkIndexをキーとして記録することで、非同期完了順序が
+                //   前後しても、最終的に正しい時系列順に並べ直せるようにする。
+                this.state.geminiFileUris.push({
+                    chunkIndex: chunkIndex,
+                    fileUri: response.fileUri
+                });
+                this.saveState();
+
+                console.log(`✅ Geminiアップロード完了（チャンク${chunkIndex}）: fileUri=${response.fileUri}`);
+                return true;
+
+            } catch (error) {
+                lastError = error;
+                console.error(`❌ Geminiアップロードエラー (${attempt + 1}回目、チャンク${chunkIndex})`, error);
+            }
+        }
+
+        // 🌟 全リトライ失敗 → 記録だけ残し、ユーザーには最終的に警告する
+        this.state.geminiUploadFailures.push({ chunkIndex, error: lastError ? lastError.message : "unknown" });
+        this.saveState();
+        console.error(`❌ チャンク${chunkIndex}のGeminiアップロードが最終的に失敗しました。このチャンクの内容は文字起こしに含まれません。`);
         return false;
     }
 
@@ -282,19 +380,22 @@ class RecorderController {
     }
 
     // ==========================================
-    // 🌟 新設（バグ修正・方式変更）：確定済み音声ファイルを使った文字起こし
-    //
-    // 🛠 目的：
-    //   録音中に生成される個別チャンクを単体で文字起こしに使うと、
-    //   ヘッダーなしチャンクをGeminiが誤って解釈し、「同一発言の重複」
-    //   「文脈の破綻」といった不具合を引き起こすことが確認された。
-    //   対策として、文字起こしは必ず「音声結合（finalizeAudio）で確定
-    //   した、1本の正しいWebMファイル」に対して行う。
-    //
-    // 🛡️ 前提：
-    //   この関数を呼ぶ前に、必ず finalizeAudioAndGetResult() が成功し、
-    //   this.state.audioFileId が設定されていること
-    //   （stopRecordingAndProcess側の呼び出し順序で保証する）。
+    // ⚠️ 非推奨（2時間超対応・逐次アップロード方式への移行に伴う変更）：
+    //   この関数は「音声結合（finalizeAudio）で確定した単一のWebMファイル」
+    //   を丸ごとGeminiに渡して文字起こしする方式で、チャンク単位の
+    //   ヘッダー問題は解決していたが、2時間超の長時間録音では以下の
+    //   2つの制約に抵触する：
+    //     ① GASのBlobサイズ上限（約50MB）を超えるとfinalizeAudio自体が失敗する
+    //     ② 長時間音声のアップロード＋ACTIVE待ちだけでGASの6分実行時間制限を
+    //        超える可能性がある
+    //   通常フローの主経路は、10分ごとに逐次Geminiアップロードしておき、
+    //   fileUriの配列だけを最後にまとめて渡す transcribeFromGeminiFileUris
+    //   に置き換えた。
+    //   この関数自体は、「お助けモード」で確定済み音声ファイルからの
+    //   緊急再開に使うため、後方互換として残している
+    //   （お助けモードの再開時点では、既にGemini側のfileUriが失効・
+    //   消失している可能性があるため、Drive上の音声原本から作り直す
+    //   経路が必要なため）。
     // ==========================================
     async transcribeFinalizedAudio(meetingName, templateType) {
         if (this.isProcessing) {
@@ -358,12 +459,105 @@ class RecorderController {
         }
     }
 
+    // ==========================================
+    // 🌟 新設（2時間超対応・逐次アップロード方式）：通常フローの主経路
+    //
+    // 🛠 目的：
+    //   録音中、10分ごとに逐次Gemini File APIへアップロードしておいた
+    //   fileUriの配列（state.geminiFileUris）を使い、重い音声データを
+    //   一切再送信することなく文字起こしを行う。
+    //   GASの6分実行時間制限にもBlobサイズ上限にも抵触しないため、
+    //   2時間・3時間規模の録音でも安定して動作する。
+    //
+    // 🛡️ 前提：
+    //   この関数を呼ぶ前に、録音中の各チャンクで
+    //   uploadChunkToGeminiAndStore() が呼ばれ、
+    //   this.state.geminiFileUris に1件以上のfileUriが記録されていること。
+    //   （Drive側の音声結合＝finalizeAudioAndGetResult とは完全に独立した
+    //    処理のため、両者の呼び出し順序に依存関係はない）
+    // ==========================================
+    async transcribeFromGeminiFileUris(meetingName, templateType) {
+        if (this.isProcessing) {
+            console.warn("⚠️ transcribeFromGeminiFileUris: 既に処理中のため、この呼び出しは無視します。");
+            return null;
+        }
+        if (this.hasFinalized) {
+            console.warn("⚠️ transcribeFromGeminiFileUris: このセッションは既に確定済みのため、この呼び出しは無視します。");
+            return null;
+        }
+        if (!this.state.geminiFileUris || this.state.geminiFileUris.length === 0) {
+            throw new Error(
+                "文字起こし対象の音声データがGeminiにアップロードされていません。" +
+                "録音が正しく行われたかご確認ください。"
+            );
+        }
+
+        this.isProcessing = true;
+
+        try {
+            // 🌟 chunkIndex順にソートしてから、fileUriだけの配列を取り出す。
+            //   非同期アップロードの完了順序が前後していても、ここで
+            //   必ず正しい時系列順に並べ直される。
+            const sortedEntries = [...this.state.geminiFileUris].sort(
+                (a, b) => a.chunkIndex - b.chunkIndex
+            );
+            const orderedFileUris = sortedEntries.map(entry => entry.fileUri);
+
+            console.log(
+                "🚀 逐次アップロード済みのfileUri配列から文字起こしを開始します...",
+                "件数:", orderedFileUris.length
+            );
+
+            const payload = {
+                action: "transcribeFromMultipleFiles",
+                fileUris: orderedFileUris,
+                mimeType: this.state.mimeType || 'audio/webm'
+            };
+
+            // 🌟 fileUri参照のみで音声データ自体は送らないため、
+            //   通信量は小さいが、Gemini側の処理時間（複数ファイル分の
+            //   解析）は長くなり得るため、リトライは粘り強く行う。
+            let lastError = null;
+            let response = null;
+            for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+                try {
+                    if (attempt > 0) {
+                        const waitTime = Math.pow(2, attempt) * 1000;
+                        console.warn(`⚠️ 文字起こし処理: ${waitTime / 1000}秒待機して再試行します... (${attempt}回目)`);
+                        await new Promise(res => setTimeout(res, waitTime));
+                    }
+                    response = await this.callGasApi(payload);
+                    break;
+                } catch (error) {
+                    lastError = error;
+                    console.error(`❌ 文字起こし処理エラー (${attempt + 1}回目)`, error);
+                }
+            }
+
+            if (!response) {
+                throw new Error(
+                    "文字起こし処理に失敗しました。音声データ自体はDriveに確定保存済み（または保存処理中）のため失われていません。" +
+                    "詳細: " + (lastError ? lastError.message : "不明なエラー")
+                );
+            }
+
+            const fullTranscript = response.text || "";
+            console.log("🎉 文字起こしが完了しました！");
+
+            return await this.finalizeSession(meetingName, templateType, fullTranscript);
+
+        } finally {
+            this.isProcessing = false;
+        }
+    }
+
     // --- 部署3: 文字起こしの通信・リトライ担当（非推奨） ---
-    // ⚠️ 非推奨（バグ修正・方式変更）：
+    // ⚠️ 非推奨（バグ修正・方式変更、および2時間超対応への移行）：
     //   録音中の個別チャンクを並列で文字起こしする従来方式。
     //   ヘッダーなしチャンクの単体文字起こしが誤った結果を生む不具合の
     //   原因だったため、通常フローからは呼び出さない。
-    //   後方互換のため関数自体は残している。新方式は transcribeFinalizedAudio を使うこと。
+    //   後方互換のため関数自体は残している。新方式は
+    //   transcribeFromGeminiFileUris を使うこと。
     async processAllChunks(meetingName, templateType, onProgressCallback) {
         if (this.isProcessing) {
             console.warn("⚠️ processAllChunks: 既に処理中のため、この呼び出しは無視します。");
@@ -482,12 +676,28 @@ class RecorderController {
         return !!(this.state && this.state.sessionId && this.state.chunks);
     }
 
+    // 🌟 新設（2時間超対応・逐次アップロード方式）：
+    //   localStorageに、録音中に逐次アップロード済みのfileUriが
+    //   1件以上残っているかどうかを判定する。これはサーバーへの問い合わせ
+    //   なしで即座に判定できるローカル情報のため、checkSessionStatus
+    //   （Drive側の状態を問い合わせる、やや重い処理）より先に確認することで、
+    //   「文字起こしからすぐ再開できる」ケースをより高速に案内できる。
+    hasPendingGeminiFileUris() {
+        return !!(this.state && this.state.geminiFileUris && this.state.geminiFileUris.length > 0);
+    }
+
     // 🌟 現在localStorageに残っているsessionIdについて、サーバー側の
     //   実データを根拠に「今どの段階か」を問い合わせる。
     //   戻り値の status:
     //     "audio_pending"                  … 音声結合がまだ（最優先で再開すべき）
     //     "audio_done_transcript_pending"  … 音声は確定済み、文字起こし以降が必要
     //     "not_found"                      … サーバー側にデータなし（再開不可）
+    //
+    // ⚠️ 注意（2時間超対応版）：この判定はDrive上の「音声原本」の状態のみを
+    //   見ており、Gemini側にアップロード済みのfileUri（文字起こし用）の
+    //   有無とは独立している。お助けモードのUI側では、まず
+    //   hasPendingGeminiFileUris() を優先的に確認し、fileUriが残っていれば
+    //   Drive側の状態に関わらず「文字起こしから再開」を案内する設計とする。
     async checkSessionStatus() {
         if (!this.state.sessionId) {
             return { status: "not_found" };
@@ -590,6 +800,22 @@ class RecorderController {
             if (this.audioAppendFailures.length > 0) {
                 console.warn("⚠️ 録音中に一部の音声追記保存が失敗していました。音声に欠損がある可能性があります。", this.audioAppendFailures);
                 resultData.audioWarning = true;
+            }
+
+            // 🌟 新設（2時間超対応・逐次アップロード方式）：
+            //   Geminiアップロードに失敗したチャンクがあった場合、
+            //   そのチャンクの発言内容は文字起こしに含まれていない
+            //   （Drive上の音声原本には残っているため、内容が完全に
+            //   失われるわけではないが、議事録には反映されていない）。
+            //   このことをユーザーに明示的に警告する。
+            if (this.state.geminiUploadFailures && this.state.geminiUploadFailures.length > 0) {
+                console.warn(
+                    "⚠️ 録音中に一部のチャンクでGeminiアップロードが失敗していました。" +
+                    "該当区間の内容は文字起こし・議事録に反映されていません。",
+                    this.state.geminiUploadFailures
+                );
+                resultData.transcriptionWarning = true;
+                resultData.missingChunkIndexes = this.state.geminiUploadFailures.map(f => f.chunkIndex);
             }
 
             this.clearState();
