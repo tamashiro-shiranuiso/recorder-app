@@ -345,6 +345,88 @@ class RecorderController {
         return data.data;
     }
 
+    // ==========================================
+    // 🌟 新設：自動再開まわり（お助けモード対応）
+    //
+    // 🛠 設計方針：
+    //   ユーザーにリンクや場所を入力させず、localStorageに残っている
+    //   sessionIdだけを使って「今どの段階から再開すべきか」を
+    //   サーバー（GAS）側の実データを根拠に判定する。
+    //   判定結果（ステータス）はUI側にそのまま伝え、
+    //   「音声結合からの再開」なのか「文字起こしからの再開」なのかを
+    //   ユーザーに明示できるようにする。
+    // ==========================================
+
+    // 🌟 未完了セッションが残っているかどうかを判定する（起動時チェック用）。
+    //   正常完了時（finalizeSession成功時）はclearState()でsessionId自体が
+    //   リセットされるため、sessionIdが残っている＝何らかの理由で
+    //   完了に至らなかったセッション、と判定できる。
+    hasPendingSession() {
+        return !!(this.state && this.state.sessionId && this.state.chunks);
+    }
+
+    // 🌟 現在localStorageに残っているsessionIdについて、サーバー側の
+    //   実データを根拠に「今どの段階か」を問い合わせる。
+    //   戻り値の status:
+    //     "audio_pending"                  … 音声結合がまだ（最優先で再開すべき）
+    //     "audio_done_transcript_pending"  … 音声は確定済み、文字起こし以降が必要
+    //     "not_found"                      … サーバー側にデータなし（再開不可）
+    async checkSessionStatus() {
+        if (!this.state.sessionId) {
+            return { status: "not_found" };
+        }
+        const payload = {
+            action: "checkSessionStatus",
+            sessionId: this.state.sessionId
+        };
+        return await this.callGasApi(payload);
+    }
+
+    // 🌟 「状態A：音声結合が未完了」からの再開。
+    //   実体はfinalizeAudioAndGetResult()と同じだが、お助けモードからの
+    //   明示的な再開であることが分かるよう、専用の入り口を用意している。
+    async resumeFromAudioPending(meetingName) {
+        console.log("🛠 お助けモード：音声結合の再開を試みます。sessionId=", this.state.sessionId);
+        return await this.finalizeAudioAndGetResult(meetingName);
+    }
+
+    // 🌟 「状態B：音声は確定済みだが、文字起こし・議事録が未完了」からの再開。
+    //   チャンク単位のデータはlocalStorageに残っていない（またはbase64を
+    //   保持していない）前提のため、確定済みの音声ファイルを丸ごと
+    //   Geminiに渡して文字起こしをやり直す。
+    async resumeFromTranscriptPending(audioFileId, mimeType, meetingName, templateType) {
+        console.log("🛠 お助けモード：確定済み音声ファイルからの文字起こし再開を試みます。audioFileId=", audioFileId);
+
+        const payload = {
+            action: "transcribeFromAudioFile",
+            audioFileId: audioFileId,
+            mimeType: mimeType || 'audio/webm'
+        };
+
+        const response = await this.callGasApi(payload);
+        const fullTranscript = response.text || "";
+
+        // 🌟 議事録生成まで含めて一気に確定させる
+        const minutesPayload = {
+            action: "generateMinutes",
+            text: fullTranscript,
+            meetingName: meetingName || "無題の会議",
+            templateType: templateType || "汎用議事録",
+            mode: this.state.mode || "3"
+        };
+
+        const minutesResponse = await this.callGasApi(minutesPayload);
+
+        // 🌟 再開完了後は、このセッションの役目は終わりなのでクリアする
+        this.clearState();
+
+        return {
+            transcript: fullTranscript,
+            documentUrl: minutesResponse.documentUrl,
+            transcriptUrl: minutesResponse.transcriptUrl
+        };
+    }
+
     // --- 部署4: 最終確定担当（音声優先確定対応・簡素化） ---
     // 🌟 変更点：音声結合はfinalizeAudioAndGetResult()が既に録音停止直後に
     //   単独で完了させている前提のため、ここでは文字起こし・議事録の保存のみ行う。
