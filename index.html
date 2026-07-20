@@ -652,10 +652,10 @@
             const audioResult = await window.appController.resumeFromAudioPending(meetingName);
             UI.recoveryStatusText.innerHTML =
                 `✅ 音声データの結合確定が完了しました！<br>` +
-                `続けて文字起こし・議事録の生成に進みます...`;
+                `続けて文字起こし・議事録の生成に進みます...（音声全体をまとめて処理するため、数分かかることがあります）`;
 
-            const result = await window.appController.processAllChunks(
-                meetingName, templateType, updateProgressUI
+            const result = await window.appController.transcribeFinalizedAudio(
+                meetingName, templateType
             );
 
             if (result) {
@@ -985,21 +985,29 @@
         }
     }
 
-    // 🌟 ondataavailableで届いた断片を「文字起こし用」「音声保存用」の両方に使う
+    // 🌟 ondataavailableで届いた断片は「音声保存専用」として扱う
     //
-    // 🛠 設計変更：
+    // 🛠 設計変更（バグ修正）：
     //   以前は「1個目のチャンクだけEBMLヘッダを持つ」という前提のもと、
     //   GAS側で1本のファイルへ追記していく方式だったが、長時間録音での
     //   ファイル破損が確認されたため、各チャンクを独立ファイルとして保存し、
     //   録音終了時にまとめて結合する方式に変更した（詳細はGAS側のコメント参照）。
-    //   そのため、ここでは「最初の断片かどうか」を意識する必要がなくなり、
-    //   チャンク番号（currentIndex）だけを送ればよい。
+    //
+    //   ⚠️ さらに重要な修正：以前はここで各チャンクを「文字起こし用」
+    //   としても個別送信していた（addTranscribeChunk）が、これが原因で
+    //   「同一発言の重複」「文脈の破綻」といった誤った文字起こし結果を
+    //   生む不具合が確認された。理由は、2個目以降のチャンクはWebMヘッダー
+    //   を持たない不完全な断片であり、Geminiがこれを無理に解釈しようと
+    //   していたため。
+    //   対策として、文字起こし用の個別送信はここから削除した。文字起こしは
+    //   録音停止後、音声結合（finalizeAudio）で確定した1本の正しい
+    //   WebMファイルに対して行う（stopRecordingAndProcess参照）。
     function handleDataAvailable(blobPart, mimeType) {
         const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
         const currentIndex = AppState.chunkIndex;
         AppState.chunkIndex++;
 
-        // UIドットを追加（文字起こし進捗表示用）
+        // UIドットを追加（保存進捗表示用）
         const dot = document.createElement('div');
         dot.className = 'dot';
         dot.id = `dot-${currentIndex}`;
@@ -1011,18 +1019,24 @@
         AppState.audioSendQueue = AppState.audioSendQueue.then(async () => {
             const base64 = await blobToBase64(blobPart);
 
-            // ① 文字起こし用チャンクとして記録（従来通り。個別のwebm断片として文字起こし依頼する）
-            if (window.appController) {
-                window.appController.addTranscribeChunk(base64, currentIndex, mimeType, meetingName);
-            }
-
-            // ② 音声本体のチャンク保存（設計変更版）
-            //    GAS側で独立ファイルとして保存され、録音終了時に結合される
+            // 🌟 音声本体のチャンク保存のみ行う。
+            //    GAS側で独立ファイルとして保存され、録音終了時に結合される。
+            //    文字起こしはここでは行わない（上記コメント参照）。
             if (window.appController) {
                 await window.appController.appendAudioChunk(base64, mimeType, meetingName, currentIndex);
             }
+
+            // 🌟 保存が完了したドットを進捗表示用に更新する
+            const dotEl = document.getElementById(`dot-${currentIndex}`);
+            if (dotEl) {
+                dotEl.classList.add('complete');
+            }
         }).catch(err => {
             console.error("❌ チャンク処理中にエラー:", err);
+            const dotEl = document.getElementById(`dot-${currentIndex}`);
+            if (dotEl) {
+                dotEl.classList.add('error');
+            }
         });
     }
 
@@ -1117,17 +1131,22 @@
             // 🌟 ここまで来た時点で、音声は既に確定済み（最優先事項は達成済み）。
             //   ここから先の文字起こし・議事録生成でエラーが起きても、
             //   音声データ自体は失われない。
+            //
+            // 🌟 変更点（バグ修正・方式変更）：
+            //   録音中の個別チャンクを文字起こしに使うと、ヘッダーなし断片を
+            //   Geminiが誤って解釈し、文字起こし結果が壊れる不具合があったため、
+            //   確定済みの1本の音声ファイル（finalizeAudioAndGetResultの結果）
+            //   に対して文字起こしを行う方式に変更した。
             UI.progressTitle.innerHTML = "🎉 音声データの保存が完了しました！";
-            UI.statusText.innerHTML = "✨ 続けてAIが文字起こし中...";
+            UI.statusText.innerHTML = "✨ 続けてAIが文字起こし中...（音声全体をまとめて処理するため、数分かかることがあります）";
 
-            const result = await window.appController.processAllChunks(
+            const result = await window.appController.transcribeFinalizedAudio(
                 meetingName,
-                templateType,
-                updateProgressUI
+                templateType
             );
 
             if (!result) {
-                console.warn("⚠️ processAllChunksがスキップされました（多重実行防止）。");
+                console.warn("⚠️ transcribeFinalizedAudioがスキップされました（多重実行防止）。");
                 // 🌟 文字起こしはスキップされたが、音声は既に確定済みなのでその旨を伝える
                 UI.progressTitle.innerHTML = "🔊 音声データの保存は完了しています";
                 UI.statusText.innerHTML = "タップして新しい録音を開始";
@@ -1237,6 +1256,9 @@
         });
     }
 
+    // ⚠️ 非推奨（バグ修正・方式変更）：
+    //   チャンク単位の個別文字起こし（processAllChunks）用の進捗表示関数。
+    //   通常フローからは呼ばれなくなったが、後方互換のため残している。
     function updateProgressUI(chunks) {
         chunks.forEach(chunk => {
             const dot = document.getElementById(`dot-${chunk.id}`);
