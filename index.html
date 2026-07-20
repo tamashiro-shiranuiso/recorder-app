@@ -389,11 +389,15 @@
         <div class="dots-grid" id="dotsGrid"></div>
     </div>
 
-    <!-- お助けモード（手動再開）パネル -->
+    <!-- お助けモード（自動再開）パネル -->
+    <!-- 🌟 変更点：リンクの手入力は廃止。保存済みsessionIdを使い、
+         サーバー側の実データを根拠に自動で状態判定・再開する方式にした。 -->
     <div class="recovery-panel help" id="recoveryPanel">
-        <h4>🛠 お助けモード（手動再開）</h4>
-        <input type="text" placeholder="Googleドライブ的リンク（※現在未使用）">
-        <button class="recovery-btn">この音声から文字起こしを再開</button>
+        <h4>🛠 お助けモード（自動再開）</h4>
+        <div id="recoveryStatusText" style="font-size: 13px; color: #868e96; line-height: 1.6; margin-bottom: 12px;">
+            前回の録音状況を確認しています...
+        </div>
+        <button class="recovery-btn" id="recoveryActionBtn" style="display:none;"></button>
     </div>
 
     <!-- システム設定パネル -->
@@ -468,6 +472,8 @@
         progressTitle: document.getElementById('progressTitle'),
         showRecoveryBtn: document.getElementById('showRecoveryBtn'),
         recoveryPanel: document.getElementById('recoveryPanel'),
+        recoveryStatusText: document.getElementById('recoveryStatusText'),
+        recoveryActionBtn: document.getElementById('recoveryActionBtn'),
         settingsBtn: document.getElementById('settingsBtn'),
         settingsPanel: document.getElementById('settingsPanel'),
         gasUrlInput: document.getElementById('gasUrlInput'),
@@ -524,11 +530,15 @@
         });
 
         // パネル制御
+        // 🌟 変更点（自動再開対応）：お助けモードを開いたタイミングで、
+        //   保存済みsessionIdを使った自動状態確認（checkRecoveryStatus）を実行する。
+        //   ユーザーはリンクやパスを入力する必要がない。
         UI.showRecoveryBtn.addEventListener('click', () => {
             UI.recoveryPanel.style.display = UI.recoveryPanel.style.display === 'block' ? 'none' : 'block';
             if(UI.recoveryPanel.style.display === 'block') {
                 UI.recoveryPanel.classList.add('fade-in');
                 UI.settingsPanel.style.display = 'none';
+                checkRecoveryStatus();
             }
         });
 
@@ -554,6 +564,147 @@
         });
 
         UI.mainRecordBtn.addEventListener('click', handleRecordButtonClick);
+    }
+
+    // ==========================================
+    // 🛠 お助けモード：自動再開ロジック
+    //
+    // 🛠 設計方針：
+    //   ユーザーにGoogleドライブのリンクやパスを入力させることはしない。
+    //   録音時に発行され、localStorageに保存されている sessionId を使い、
+    //   GAS側に「このsessionIdは今どの段階まで完了しているか」を問い合わせ、
+    //   その結果に応じて「① 音声結合からの再開」「② 文字起こし・議事録
+    //   生成からの再開」のどちらであるかを画面に明示したうえで再開する。
+    //
+    //   状態は必ず次のいずれかとして、ユーザーに分かる言葉で表示する：
+    //     ・音声データの結合確定（1本化）が完了していない状態
+    //     ・音声は確定済みだが、文字起こし・議事録がまだの状態
+    //     ・再開できる前回の録音データが見つからない状態
+    // ==========================================
+    async function checkRecoveryStatus() {
+        UI.recoveryActionBtn.style.display = "none";
+
+        if (!window.appController || !window.appController.hasPendingSession()) {
+            UI.recoveryStatusText.innerHTML =
+                "再開が必要な前回の録音は見つかりませんでした。<br>" +
+                "（すべて正常に完了しているか、まだ録音を行っていません）";
+            return;
+        }
+
+        if (!window.appController.gasUrl) {
+            UI.recoveryStatusText.innerHTML =
+                "⚠️ GASのURLが設定されていないため、状態を確認できません。先に⚙️設定を行ってください。";
+            return;
+        }
+
+        UI.recoveryStatusText.innerHTML = "🔍 前回の録音の状態をサーバーに問い合わせています...";
+
+        try {
+            const statusResult = await window.appController.checkSessionStatus();
+            renderRecoveryStatus(statusResult);
+        } catch (err) {
+            console.error("❌ お助けモード：状態確認に失敗しました", err);
+            UI.recoveryStatusText.innerHTML =
+                "⚠️ 状態の確認中にエラーが発生しました。通信環境をご確認のうえ、" +
+                "もう一度「手動再開」を開き直してください。<br>詳細: " + err.message;
+        }
+    }
+
+    function renderRecoveryStatus(statusResult) {
+        const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
+        const templateType = UI.templateSelect.value;
+
+        if (statusResult.status === "audio_pending") {
+            // 🌟 状態①：音声データの結合確定（1本化）がまだ完了していない
+            UI.recoveryStatusText.innerHTML =
+                `🔊 <b>「音声データの結合確定」が未完了です。</b><br>` +
+                `録音の断片（${statusResult.pendingChunkCount}個）がサーバーに保存された状態で止まっています。<br>` +
+                `まずは音声を1本にまとめる処理から再開します。`;
+            UI.recoveryActionBtn.textContent = "① 音声データの結合確定から再開する";
+            UI.recoveryActionBtn.style.display = "block";
+            UI.recoveryActionBtn.onclick = () => runRecoveryAudioPending(meetingName, templateType);
+
+        } else if (statusResult.status === "audio_done_transcript_pending") {
+            // 🌟 状態②：音声は確定済み。文字起こし・議事録がまだ
+            UI.recoveryStatusText.innerHTML =
+                `✅ <b>音声データはすでに1本化・確定済みです。</b>（ファイル名: ${statusResult.audioFileName}）<br>` +
+                `🔊 音声データ自体は失われていません。<br>` +
+                `文字起こし・議事録の生成だけが未完了のため、そこから再開します。`;
+            UI.recoveryActionBtn.textContent = "② 文字起こし・議事録の生成から再開する";
+            UI.recoveryActionBtn.style.display = "block";
+            UI.recoveryActionBtn.onclick = () => runRecoveryTranscriptPending(
+                statusResult.audioFileId, meetingName, templateType
+            );
+
+        } else {
+            // 🌟 状態③：サーバー側にもデータが見当たらない
+            UI.recoveryStatusText.innerHTML =
+                "⚠️ サーバー側にも、このセッションに対応する録音データが見つかりませんでした。<br>" +
+                "お手数ですが、Googleドライブの「レコーダー」フォルダを直接ご確認ください。";
+        }
+    }
+
+    async function runRecoveryAudioPending(meetingName, templateType) {
+        UI.recoveryActionBtn.disabled = true;
+        UI.recoveryStatusText.innerHTML = "🔊 音声データを1本にまとめています...";
+
+        try {
+            const audioResult = await window.appController.resumeFromAudioPending(meetingName);
+            UI.recoveryStatusText.innerHTML =
+                `✅ 音声データの結合確定が完了しました！<br>` +
+                `続けて文字起こし・議事録の生成に進みます...`;
+
+            const result = await window.appController.processAllChunks(
+                meetingName, templateType, updateProgressUI
+            );
+
+            if (result) {
+                finishRecoveryUI(result);
+            } else {
+                UI.recoveryStatusText.innerHTML =
+                    "✅ 音声データの結合確定は完了しました。（文字起こしは別途「手動再開」から再度お試しください）";
+            }
+        } catch (err) {
+            console.error("❌ お助けモード：音声結合の再開に失敗しました", err);
+            UI.recoveryStatusText.innerHTML =
+                "⚠️ 音声データの結合確定に失敗しました。もう一度お試しいただくか、" +
+                "Googleドライブの「レコーダー/_一時録音中」フォルダをご確認ください。<br>詳細: " + err.message;
+        } finally {
+            UI.recoveryActionBtn.disabled = false;
+        }
+    }
+
+    async function runRecoveryTranscriptPending(audioFileId, meetingName, templateType) {
+        UI.recoveryActionBtn.disabled = true;
+        UI.recoveryStatusText.innerHTML = "✨ 確定済みの音声データからAIが文字起こし中です...";
+
+        try {
+            const result = await window.appController.resumeFromTranscriptPending(
+                audioFileId, AppState.mimeType, meetingName, templateType
+            );
+            finishRecoveryUI(result);
+        } catch (err) {
+            console.error("❌ お助けモード：文字起こしの再開に失敗しました", err);
+            UI.recoveryStatusText.innerHTML =
+                "⚠️ 文字起こし・議事録生成の再開に失敗しました。もう一度お試しください。<br>詳細: " + err.message;
+        } finally {
+            UI.recoveryActionBtn.disabled = false;
+        }
+    }
+
+    function finishRecoveryUI(result) {
+        UI.recoveryStatusText.innerHTML = "🎉 再開処理が完了しました！";
+        UI.recoveryActionBtn.style.display = "none";
+
+        if (result.documentUrl) {
+            if (confirm("議事録の生成が完了しました！議事録ドキュメントを開きますか？")) {
+                window.open(result.documentUrl, "_blank");
+            }
+        } else if (result.transcriptUrl) {
+            if (confirm("文字起こしが完了しました！文字起こしドキュメントを開きますか？")) {
+                window.open(result.transcriptUrl, "_blank");
+            }
+        }
     }
 
     // ==========================================
