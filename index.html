@@ -427,22 +427,35 @@
     // ==========================================
     // 🔧 設定と状態管理
     // ==========================================
-    // 🛠 方式B：
-    //   ・MediaRecorder は録音開始から停止まで「1個だけ」使い続ける
-    //   ・start(timesliceMs) により、CHUNK_INTERVAL_MS ごとに ondataavailable が発火する
-    //   ・1個目の断片だけがEBMLヘッダを持ち、以降は継続クラスタデータのみになるため、
-    //     順番通りGASへ送って追記保存すれば、最終的に正しい1本のwebmになる
+    // 🛠 2時間超対応版（逐次アップロード方式）：
+    //   ・従来のtimeslice方式（1個のMediaRecorderをtimesliceで区切る）は
+    //     廃止した。最初のチャンクだけが正しいWebMヘッダーを持ち、
+    //     2個目以降はヘッダーなしの断片になるという構造的な問題があり、
+    //     これがGeminiの誤った文字起こし（重複・文脈破綻）の原因だった。
+    //   ・新方式：SEGMENT_INTERVAL_MSごとに、MediaRecorderを
+    //     「完全停止→即座に新しいインスタンスで再開」する。
+    //     stop()時にondataavailableが1回だけ発火し、それが「正しい
+    //     ヘッダーを持つ、完全で独立した1本のWebMファイル」になる。
+    //   ・確定した各セグメントは、Drive保存（appendAudioChunk）と
+    //     Geminiアップロード（uploadChunkToGeminiAndStore）の両方に、
+    //     非同期で並行して送信される。
+    //   ・切り替え時に生じる一瞬の録音の途切れ（数百ミリ秒程度）は、
+    //     文字起こし側のプロンプトで「ファイル境界での自然な補完」を
+    //     指示することで、実用上の影響を抑えている。
     const APP_CONFIG = {
-        CHUNK_INTERVAL_MS: 600000, // 本番運用: 10分（テストする場合は短い値に変更してください）
+        SEGMENT_INTERVAL_MS: 600000, // 本番運用: 10分（テストする場合は短い値に変更してください）
         PSEUDO_SLEEP_DELAY_MS: 15000 // 🌟 追加：録音中、操作がないままこの時間が経つと疑似スリープ表示になる
     };
 
     const AppState = {
         isRecording: false,
         isStopping: false,
-        recorder: null,            // 🌟 録音セッション中ずっと同じインスタンスを使い続ける
+        // 🌟 変更点（2時間超対応）：recorderは「現在進行中のセグメント」の
+        //   MediaRecorderインスタンスを指す。SEGMENT_INTERVAL_MSごとに
+        //   完全停止→新しいインスタンスに差し替えられる（使い捨て）。
+        recorder: null,
         globalStream: null,
-        chunkIndex: 0,              // 文字起こし用・音声保存用チャンクの通し番号
+        chunkIndex: 0,              // セグメント（10分単位）の通し番号
         mimeType: 'audio/webm',
         recordingStartedAt: null,
         elapsedTimerId: null,
@@ -450,9 +463,16 @@
         wakeLockSupported: 'wakeLock' in navigator,  // 🌟 追加：端末がWake Lock APIに対応しているか
         pseudoSleepTimerId: null,    // 🌟 追加：疑似スリープ発動までの無操作タイマー
         isPseudoSleeping: false,     // 🌟 追加：現在疑似スリープ表示中かどうか
-        // 🌟 追加：appendAudioChunkの送信を順番通りに実行するためのキュー
-        //   （ondataavailableは発火順が保証されるが、非同期送信が追い越さないようにする）
-        audioSendQueue: Promise.resolve()
+        // 🌟 追加：appendAudioChunk / uploadChunkToGeminiAndStore の送信を
+        //   順番通りに実行するためのキュー（各セグメント確定のたびに繋げる）
+        audioSendQueue: Promise.resolve(),
+        // 🌟 新設（2時間超対応）：次のセグメント切り替えを予約するタイマーID。
+        //   stopRecordingAndProcess側で確実にクリアする必要がある。
+        segmentTimerId: null,
+        // 🌟 新設（2時間超対応）：ユーザーが「録音終了」を押したかどうかを示す
+        //   フラグ。セグメントのonstopハンドラ内で「次のセグメントを
+        //   自動的に開始すべきか」を判定するために使う。
+        isSegmentCycleActive: false
     };
 
     const UI = {
@@ -597,6 +617,30 @@
             return;
         }
 
+        // ==========================================
+        // 🌟 新設（2時間超対応・逐次アップロード方式）：
+        //   まずローカル（localStorage）だけで判定できる情報を確認する。
+        //   録音中に逐次アップロード済みのfileUriがlocalStorageに
+        //   残っていれば、サーバーへの問い合わせなしで即座に
+        //   「文字起こしから再開できる」ことが分かる。この経路は
+        //   checkSessionStatus（Drive側の状態を問い合わせる、やや重い
+        //   処理）より優先し、より高速な案内を提供する。
+        // ==========================================
+        if (window.appController.hasPendingGeminiFileUris()) {
+            const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
+            const templateType = UI.templateSelect.value;
+            const uploadedCount = window.appController.state.geminiFileUris.length;
+
+            UI.recoveryStatusText.innerHTML =
+                `✨ <b>AIアップロード済みの録音データが見つかりました。</b>` +
+                `（${uploadedCount}セグメント分）<br>` +
+                `重い音声の再送信なしで、すぐに文字起こし・議事録の生成から再開できます。`;
+            UI.recoveryActionBtn.textContent = "✨ 文字起こし・議事録の生成から再開する";
+            UI.recoveryActionBtn.style.display = "block";
+            UI.recoveryActionBtn.onclick = () => runRecoveryFromGeminiFileUris(meetingName, templateType);
+            return;
+        }
+
         UI.recoveryStatusText.innerHTML = "🔍 前回の録音の状態をサーバーに問い合わせています...";
 
         try {
@@ -650,19 +694,42 @@
 
         try {
             const audioResult = await window.appController.resumeFromAudioPending(meetingName);
-            UI.recoveryStatusText.innerHTML =
-                `✅ 音声データの結合確定が完了しました！<br>` +
-                `続けて文字起こし・議事録の生成に進みます...（音声全体をまとめて処理するため、数分かかることがあります）`;
 
-            const result = await window.appController.transcribeFinalizedAudio(
-                meetingName, templateType
-            );
+            // 🌟 2時間超対応：音声結合の再開後、localStorageにfileUriが
+            //   残っていれば新方式（transcribeFromGeminiFileUris）で
+            //   続行する。残っていなければ、Drive上の確定済みファイルから
+            //   作り直す緊急経路（transcribeFinalizedAudio）にフォールバックする。
+            if (window.appController.hasPendingGeminiFileUris()) {
+                UI.recoveryStatusText.innerHTML =
+                    `✅ 音声データの結合確定が完了しました！<br>` +
+                    `続けて文字起こし・議事録の生成に進みます...（数分かかることがあります）`;
 
-            if (result) {
-                finishRecoveryUI(result);
+                const result = await window.appController.transcribeFromGeminiFileUris(
+                    meetingName, templateType
+                );
+
+                if (result) {
+                    finishRecoveryUI(result);
+                } else {
+                    UI.recoveryStatusText.innerHTML =
+                        "✅ 音声データの結合確定は完了しました。（文字起こしは別途「手動再開」から再度お試しください）";
+                }
             } else {
                 UI.recoveryStatusText.innerHTML =
-                    "✅ 音声データの結合確定は完了しました。（文字起こしは別途「手動再開」から再度お試しください）";
+                    `✅ 音声データの結合確定が完了しました！<br>` +
+                    `AIアップロード済みのデータが見つからないため、確定済みの音声ファイルから` +
+                    `文字起こしをやり直します...（音声全体をまとめて処理するため、数分かかることがあります）`;
+
+                const result = await window.appController.transcribeFinalizedAudio(
+                    meetingName, templateType
+                );
+
+                if (result) {
+                    finishRecoveryUI(result);
+                } else {
+                    UI.recoveryStatusText.innerHTML =
+                        "✅ 音声データの結合確定は完了しました。（文字起こしは別途「手動再開」から再度お試しください）";
+                }
             }
         } catch (err) {
             console.error("❌ お助けモード：音声結合の再開に失敗しました", err);
@@ -674,13 +741,48 @@
         }
     }
 
+    // ==========================================
+    // 🌟 新設（2時間超対応・逐次アップロード方式）：
+    //   localStorageに残っているfileUri配列だけを使い、重い音声の
+    //   再アップロードなしで即座に文字起こし・議事録生成から再開する。
+    //   お助けモードの中で最も高速に完了する経路。
+    // ==========================================
+    async function runRecoveryFromGeminiFileUris(meetingName, templateType) {
+        UI.recoveryActionBtn.disabled = true;
+        UI.recoveryStatusText.innerHTML = "✨ アップロード済みの音声データから文字起こし中です...（数分かかることがあります）";
+
+        try {
+            const result = await window.appController.transcribeFromGeminiFileUris(
+                meetingName, templateType
+            );
+
+            if (result) {
+                finishRecoveryUI(result);
+            } else {
+                UI.recoveryStatusText.innerHTML =
+                    "⚠️ 処理がスキップされました（既に処理中か、確定済みの可能性があります）。";
+            }
+        } catch (err) {
+            console.error("❌ お助けモード：fileUriからの文字起こし再開に失敗しました", err);
+            UI.recoveryStatusText.innerHTML =
+                "⚠️ 文字起こし・議事録生成の再開に失敗しました。もう一度お試しください。<br>詳細: " + err.message;
+        } finally {
+            UI.recoveryActionBtn.disabled = false;
+        }
+    }
+
     async function runRecoveryTranscriptPending(audioFileId, meetingName, templateType) {
         UI.recoveryActionBtn.disabled = true;
         UI.recoveryStatusText.innerHTML = "✨ 確定済みの音声データからAIが文字起こし中です...";
 
         try {
+            // 🌟 修正：AppState.mimeTypeはページ再読み込み後は初期値
+            //   （'audio/webm'）に戻ってしまっている可能性があるため、
+            //   録音時にstateへ記録済みの正しい値（appController.state.mimeType）
+            //   を優先して使う。
+            const mimeType = window.appController.state.mimeType || AppState.mimeType;
             const result = await window.appController.resumeFromTranscriptPending(
-                audioFileId, AppState.mimeType, meetingName, templateType
+                audioFileId, mimeType, meetingName, templateType
             );
             finishRecoveryUI(result);
         } catch (err) {
@@ -899,6 +1001,7 @@
 
             AppState.isRecording = true;
             AppState.isStopping = false;
+            AppState.isSegmentCycleActive = true;
             AppState.chunkIndex = 0;
             AppState.audioSendQueue = Promise.resolve();
             AppState.recordingStartedAt = Date.now();
@@ -923,61 +1026,18 @@
             startElapsedTimeDisplay();
 
             // 端末の対応フォーマット自動判定
-            let options = {};
             let mimeType = 'audio/webm';
             if (MediaRecorder.isTypeSupported('audio/webm')) {
-                options = { mimeType: 'audio/webm' };
                 mimeType = 'audio/webm';
             } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-                options = { mimeType: 'audio/mp4' };
                 mimeType = 'audio/mp4';
             }
             AppState.mimeType = mimeType;
 
-            // 🌟 方式Bの核心：MediaRecorderは録音開始から停止まで「1個だけ」
-            const recorder = new MediaRecorder(AppState.globalStream, options);
-            AppState.recorder = recorder;
-
-            recorder.ondataavailable = (e) => {
-                if (e.data.size === 0) return;
-                handleDataAvailable(e.data, mimeType);
-            };
-
-            recorder.onstop = () => {
-                console.log("🛑 MediaRecorder停止確定");
-                if (typeof AppState._onRecorderStopped === 'function') {
-                    AppState._onRecorderStopped();
-                }
-            };
-
-            // 🌟 追加：録音異常終了の検知（画面スリープ・OSによる強制中断等）
-            //   MediaRecorderがエラーで停止した場合、ユーザーが気づかないまま
-            //   「録音中の表示のまま実際は止まっている」状態になるのを防ぐため、
-            //   即座に画面に警告を出す。
-            //   ※ これが発生した時点までのチャンクは、既にGAS側へ個別保存
-            //     済みのため失われない（設計上の安全策）。ユーザーには
-            //     録音の再開を促す。
-            recorder.onerror = (event) => {
-                console.error("❌ MediaRecorderでエラーが発生しました:", event.error);
-                UI.statusText.innerHTML = "⚠️ 録音が中断されました（スリープ等の可能性）。もう一度録音を開始してください。";
-                UI.statusText.style.color = "#fa5252";
-                AppState.isRecording = false;
-                stopElapsedTimeDisplay();
-                stopPseudoSleepCycle();
-                releaseWakeLock();
-                document.body.classList.remove('recording-active');
-                UI.mainRecordBtn.classList.remove('recording');
-                UI.mainRecordBtn.innerHTML = "🎤";
-                UI.mainRecordBtn.disabled = false;
-                alert(
-                    "録音が予期せず中断されました。画面スリープや他アプリへの切り替えが原因の可能性があります。\n" +
-                    "これまでに録音できた部分は保存されていますが、続きを録音する場合は「録音開始」を押して新しく録音を始めてください。"
-                );
-            };
-
-            // 🌟 timesliceを指定して開始。これにより同一インスタンスのまま
-            //   CHUNK_INTERVAL_MSごとにondataavailableが発火する
-            recorder.start(APP_CONFIG.CHUNK_INTERVAL_MS);
+            // 🌟 2時間超対応：最初のセグメントを開始する。
+            //   以降のセグメント切り替えは startNewSegment 内で自律的に
+            //   繰り返される（onstopハンドラから次のセグメントを起動する）。
+            startNewSegment();
 
         } catch (err) {
             alert("マイクのアクセスが許可されませんでした。ブラウザの設定を確認してください。");
@@ -985,87 +1045,227 @@
         }
     }
 
-    // 🌟 ondataavailableで届いた断片は「音声保存専用」として扱う
+    // ==========================================
+    // 🌟 新設（2時間超対応・逐次アップロード方式）：セグメント単位の録音制御
     //
-    // 🛠 設計変更（バグ修正）：
-    //   以前は「1個目のチャンクだけEBMLヘッダを持つ」という前提のもと、
-    //   GAS側で1本のファイルへ追記していく方式だったが、長時間録音での
-    //   ファイル破損が確認されたため、各チャンクを独立ファイルとして保存し、
-    //   録音終了時にまとめて結合する方式に変更した（詳細はGAS側のコメント参照）。
+    // 🛠 目的：
+    //   SEGMENT_INTERVAL_MS（10分）ごとに、MediaRecorderを「完全停止→
+    //   新しいインスタンスで即座に再開」する。これにより、
+    //   すべてのセグメントが「正しいヘッダーを持つ、完全で独立した
+    //   1本のWebMファイル」として生成される（timeslice方式のヘッダー
+    //   問題を構造的に回避する）。
     //
-    //   ⚠️ さらに重要な修正：以前はここで各チャンクを「文字起こし用」
-    //   としても個別送信していた（addTranscribeChunk）が、これが原因で
-    //   「同一発言の重複」「文脈の破綻」といった誤った文字起こし結果を
-    //   生む不具合が確認された。理由は、2個目以降のチャンクはWebMヘッダー
-    //   を持たない不完全な断片であり、Geminiがこれを無理に解釈しようと
-    //   していたため。
-    //   対策として、文字起こし用の個別送信はここから削除した。文字起こしは
-    //   録音停止後、音声結合（finalizeAudio）で確定した1本の正しい
-    //   WebMファイルに対して行う（stopRecordingAndProcess参照）。
-    function handleDataAvailable(blobPart, mimeType) {
-        const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
-        const currentIndex = AppState.chunkIndex;
-        AppState.chunkIndex++;
+    // 🛡️ 自律的な繰り返し：
+    //   各セグメントのonstopハンドラの中で、録音継続中
+    //   （AppState.isSegmentCycleActiveがtrueの間）であれば、
+    //   次のセグメントを即座に自動開始する。ユーザーが「録音終了」を
+    //   押すと、このフラグがfalseになり、連鎖が自然に止まる。
+    //
+    // ⏱️ タイマーの実装方針：
+    //   setIntervalではなく、各セグメント開始時にsetTimeoutを1回だけ
+    //   予約する方式にしている。stop()の実行〜次のstart()までには
+    //   若干の非同期処理（Blob確定、次インスタンス生成）が挟まるため、
+    //   setIntervalで固定間隔にすると徐々にタイマーがズレる
+    //   （ドリフトする）可能性がある。setTimeoutの再帰呼び出しなら、
+    //   常に「直前のセグメント開始からSEGMENT_INTERVAL_MS後」という
+    //   相対時間で正確に予約できる。
+    // ==========================================
+    function startNewSegment() {
+        if (!AppState.isSegmentCycleActive) {
+            console.log("🛑 セグメントサイクルが終了しているため、新しいセグメントは開始しません。");
+            return;
+        }
 
-        // UIドットを追加（保存進捗表示用）
+        const mimeType = AppState.mimeType;
+        const options = mimeType ? { mimeType: mimeType } : {};
+
+        // 🌟 使い捨てのMediaRecorderインスタンス。timesliceは指定しない
+        //   （指定しない＝stop()が呼ばれた時に、録音開始からの全データが
+        //   1個の完全なBlobとしてondataavailableで一度だけ渡される）。
+        const recorder = new MediaRecorder(AppState.globalStream, options);
+        AppState.recorder = recorder;
+
+        // 🌟 このセグメントで蓄積されたBlobパーツ（通常は1個だが、
+        //   ブラウザ実装によっては複数回に分かれて発火する可能性があるため
+        //   念のため配列で受ける）
+        let segmentBlobParts = [];
+
+        recorder.ondataavailable = (e) => {
+            if (e.data.size === 0) return;
+            segmentBlobParts.push(e.data);
+        };
+
+        recorder.onstop = () => {
+            const segmentIndex = AppState.chunkIndex;
+            AppState.chunkIndex++;
+
+            console.log(`🛑 セグメント${segmentIndex}の録音を停止しました。パーツ数: ${segmentBlobParts.length}`);
+
+            if (segmentBlobParts.length > 0) {
+                const segmentBlob = new Blob(segmentBlobParts, { type: mimeType });
+                handleSegmentComplete(segmentBlob, mimeType, segmentIndex);
+            } else {
+                console.warn(`⚠️ セグメント${segmentIndex}: データが空のため、送信をスキップします。`);
+            }
+
+            // 🌟 stop()完了を待っている処理（録音終了時のwaitForRecorderToStop）
+            //   があれば、ここで解決する。
+            if (typeof AppState._onRecorderStopped === 'function') {
+                const callback = AppState._onRecorderStopped;
+                AppState._onRecorderStopped = null;
+                callback();
+            }
+
+            // 🌟 録音継続中であれば、間髪入れずに次のセグメントを開始する。
+            //   これにより「完全停止→即再開」の切り替えが実現する。
+            if (AppState.isSegmentCycleActive) {
+                startNewSegment();
+            }
+        };
+
+        // 🌟 追加：セグメント単位の録音異常終了の検知（画面スリープ・OSによる強制中断等）
+        recorder.onerror = (event) => {
+            console.error("❌ MediaRecorderでエラーが発生しました:", event.error);
+            UI.statusText.innerHTML = "⚠️ 録音が中断されました（スリープ等の可能性）。もう一度録音を開始してください。";
+            UI.statusText.style.color = "#fa5252";
+            AppState.isRecording = false;
+            AppState.isSegmentCycleActive = false;
+            if (AppState.segmentTimerId) {
+                clearTimeout(AppState.segmentTimerId);
+                AppState.segmentTimerId = null;
+            }
+            stopElapsedTimeDisplay();
+            stopPseudoSleepCycle();
+            releaseWakeLock();
+            document.body.classList.remove('recording-active');
+            UI.mainRecordBtn.classList.remove('recording');
+            UI.mainRecordBtn.innerHTML = "🎤";
+            UI.mainRecordBtn.disabled = false;
+            alert(
+                "録音が予期せず中断されました。画面スリープや他アプリへの切り替えが原因の可能性があります。\n" +
+                "これまでに録音できた部分は保存されていますが、続きを録音する場合は「録音開始」を押して新しく録音を始めてください。"
+            );
+        };
+
+        recorder.start();
+
+        // 🌟 SEGMENT_INTERVAL_MS後に、このセグメントを自動的に停止するよう予約する。
+        //   ユーザーが手動で「録音終了」を押した場合は、
+        //   stopRecordingAndProcess側でこのタイマーをクリアしたうえで
+        //   直接stop()を呼ぶため、二重停止にはならない。
+        AppState.segmentTimerId = setTimeout(() => {
+            if (AppState.recorder && AppState.recorder.state === "recording") {
+                AppState.recorder.stop();
+            }
+        }, APP_CONFIG.SEGMENT_INTERVAL_MS);
+    }
+
+    // ==========================================
+    // 🌟 新設（2時間超対応・逐次アップロード方式）：
+    //   1セグメント（10分・完全なWebMファイル）が確定した際の処理。
+    //   Drive保存（appendAudioChunk）とGeminiアップロード
+    //   （uploadChunkToGeminiAndStore）を並行して非同期に行う。
+    // ==========================================
+    function handleSegmentComplete(segmentBlob, mimeType, segmentIndex) {
+        const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
+
+        // UIドットを追加（保存・アップロード進捗表示用）
         const dot = document.createElement('div');
         dot.className = 'dot';
-        dot.id = `dot-${currentIndex}`;
+        dot.id = `dot-${segmentIndex}`;
         UI.dotsGrid.appendChild(dot);
 
         // 🌟 送信順序を保証するため、キューに繋げて順番に処理する
-        //   （結合はチャンク番号でソートして行うため厳密な送信順は必須ではないが、
-        //    メモリ上のBlob参照を安全に処理するため直列化を維持している）
         AppState.audioSendQueue = AppState.audioSendQueue.then(async () => {
-            const base64 = await blobToBase64(blobPart);
+            const base64 = await blobToBase64(segmentBlob);
 
-            // 🌟 音声本体のチャンク保存のみ行う。
-            //    GAS側で独立ファイルとして保存され、録音終了時に結合される。
-            //    文字起こしはここでは行わない（上記コメント参照）。
-            if (window.appController) {
-                await window.appController.appendAudioChunk(base64, mimeType, meetingName, currentIndex);
+            // 🌟 Drive保存とGeminiアップロードは、目的が異なる独立した処理のため、
+            //   互いの成否に関わらず両方とも実行する（Promise.allSettled）。
+            //   片方が失敗しても、もう片方の処理まで止めないようにするため。
+            const results = await Promise.allSettled([
+                window.appController
+                    ? window.appController.appendAudioChunk(base64, mimeType, meetingName, segmentIndex)
+                    : Promise.resolve(false),
+                window.appController
+                    ? window.appController.uploadChunkToGeminiAndStore(base64, mimeType, segmentIndex)
+                    : Promise.resolve(false)
+            ]);
+
+            const driveOk = results[0].status === 'fulfilled' && results[0].value === true;
+            const geminiOk = results[1].status === 'fulfilled' && results[1].value === true;
+
+            const dotEl = document.getElementById(`dot-${segmentIndex}`);
+            if (dotEl) {
+                // 🌟 文字起こしへの影響が大きいGemini側の成否を優先して表示する。
+                //   Drive側だけ失敗した場合は「complete」のまま
+                //   （原本バックアップの欠損はaudioWarningで別途警告されるため）。
+                if (geminiOk) {
+                    dotEl.classList.add('complete');
+                } else {
+                    dotEl.classList.add('error');
+                }
             }
 
-            // 🌟 保存が完了したドットを進捗表示用に更新する
-            const dotEl = document.getElementById(`dot-${currentIndex}`);
-            if (dotEl) {
-                dotEl.classList.add('complete');
+            if (!driveOk) {
+                console.warn(`⚠️ セグメント${segmentIndex}: Drive保存に失敗しました（音声原本バックアップに影響）。`);
+            }
+            if (!geminiOk) {
+                console.warn(`⚠️ セグメント${segmentIndex}: Geminiアップロードに失敗しました（文字起こしに影響）。`);
             }
         }).catch(err => {
-            console.error("❌ チャンク処理中にエラー:", err);
-            const dotEl = document.getElementById(`dot-${currentIndex}`);
+            console.error("❌ セグメント処理中に予期しないエラー:", err);
+            const dotEl = document.getElementById(`dot-${segmentIndex}`);
             if (dotEl) {
                 dotEl.classList.add('error');
             }
         });
     }
 
+
+
     // ==========================================
-    // 🌟 変更点（音声優先確定対応）：
-    //   録音停止後の処理順序を、
-    //     ① 音声の1本化・確定保存（最優先） → ② 文字起こし → ③ 議事録生成
-    //   の順に変更した。
+    // 🌟 変更点（2時間超対応・逐次アップロード方式）：
+    //   録音停止後の処理を、
+    //     ① セグメントサイクルの停止（最後のセグメントを確定）
+    //     ② Drive音声結合（finalizeAudio）と
+    //        Gemini文字起こし（transcribeFromGeminiFileUris）を並行実行
+    //     ③ 議事録生成
+    //   という流れに変更した。
     //
     //   ねらい：
-    //   文字起こし・議事録生成の途中でスマホがスリープ→通信断・エラーに
-    //   なっても、「音声さえ確保できていれば他の方法で議事録化できる」
-    //   という運用方針を成立させるため、音声の確定保存を最優先で完了させる。
+    //   従来（音声優先確定対応）は「音声結合→文字起こし」を直列で行って
+    //   いたが、2時間超対応版では文字起こしに必要なfileUriは録音中に
+    //   既にGeminiへアップロード済みのため、Drive側の音声結合を待つ
+    //   理由がなくなった。両者は完全に独立した処理のため、並行実行
+    //   することでユーザーの待ち時間を短縮する。
+    //   なお「音声（Drive原本）は必ず確保される」という当初の最優先方針は、
+    //   Drive保存が録音中の逐次appendAudioChunkの時点で既にほぼ完了して
+    //   いるため、この並行実行によって損なわれることはない。
     //
-    //   また、Wake Lockの解放（releaseWakeLock）を、従来の「録音停止直後」
-    //   から「音声確定処理が終わった後」に移動した。これにより、
-    //   「AIによる変換中」の表示中（＝実際には音声確定〜文字起こしの通信中）
-    //   にスマホがスリープしてしまうリスクを大きく減らす。
+    //   Wake Lockの解放（releaseWakeLock）は、従来通り「両方の処理が
+    //   終わった後」まで維持する。これにより、「AIによる変換中」表示中に
+    //   スマホがスリープしてしまうリスクを引き続き抑える。
     // ==========================================
     async function stopRecordingAndProcess() {
         if (AppState.isStopping) return;
         AppState.isStopping = true;
         AppState.isRecording = false;
+        // 🌟 これ以降、セグメントのonstopハンドラは「次のセグメントを
+        //   自動開始しない」（連鎖を止める）。
+        AppState.isSegmentCycleActive = false;
+
+        // 🌟 予約されている次回の自動セグメント切り替えタイマーをクリアする
+        if (AppState.segmentTimerId) {
+            clearTimeout(AppState.segmentTimerId);
+            AppState.segmentTimerId = null;
+        }
+
         stopElapsedTimeDisplay();
         stopPseudoSleepCycle();
 
-        // 🌟 変更点：Wake Lockはこの時点ではまだ解放しない。
-        //   「音声の確定保存」が終わるまではスリープを防ぎ続けたいため、
-        //   解放タイミングを音声確定処理の後ろ（finally節）へ移動した。
+        // 🌟 Wake Lockはこの時点ではまだ解放しない。
+        //   「音声確定・文字起こし」の両方が終わるまではスリープを防ぎ続けたい
+        //   ため、解放タイミングは処理の後ろ（finally節）へ置いている。
         //   （ダークトーン表示は録音中の見た目のためのものなので、ここで解除してよい）
         document.body.classList.remove('recording-active');
 
@@ -1073,11 +1273,11 @@
         UI.mainRecordBtn.classList.remove('recording');
         UI.mainRecordBtn.innerHTML = "🎤";
         UI.mainRecordBtn.style.display = "none";
-        UI.statusText.innerHTML = "🎤 録音を確定しています...";
+        UI.statusText.innerHTML = "🎤 最後のセグメントを確定しています...";
         UI.statusText.style.color = "#4dabf7";
 
         try {
-            // 🌟 最後の断片（stop時点までの未送信データ）を確定させてから停止を待つ
+            // 🌟 現在進行中のセグメントを停止させ、最後のセグメントを確定させる
             await waitForRecorderToStop();
 
             // マイクの物理接続を完全にオフ
@@ -1086,9 +1286,9 @@
                 AppState.globalStream = null;
             }
 
-            // 🌟 重要：最後の ondataavailable ぶんの送信キューが完了するのを待つ
-            //   （onstop発火後も、handleDataAvailable内の非同期処理が終わっていない可能性があるため）
-            UI.statusText.innerHTML = "✨ 最後の音声データを保存中...";
+            // 🌟 重要：最後のセグメントぶんの送信キュー（Drive保存＋Geminiアップロード）
+            //   が完了するのを待つ
+            UI.statusText.innerHTML = "✨ 最後の音声データを保存・アップロード中...";
             await AppState.audioSendQueue;
 
             if (!window.appController) throw new Error("現場監督のプログラムが読み込まれていません。");
@@ -1097,63 +1297,77 @@
             const templateType = UI.templateSelect.value;
 
             // ==========================================
-            // 🌟 最優先ステップ（音声優先確定対応）：
-            //   文字起こし・議事録生成より先に、音声だけを1本のファイルとして
-            //   必ず確定させる。
-            //   これにより、この後の文字起こし処理でエラーが起きても、
-            //   録音した音声そのものは既にドライブへ確定保存済みとなるため、
-            //   別の方法・別のタイミングで議事録化する道が残る。
+            // 🌟 2時間超対応：Drive音声結合とGemini文字起こしを並行実行する。
+            //   両者は完全に独立した処理（前者はDriveの一時ファイルを対象、
+            //   後者はGemini側に既にアップロード済みのfileUriを対象）のため、
+            //   互いの成否・完了タイミングに依存しない。
             // ==========================================
-            UI.statusText.innerHTML = "🔊 音声データを1本にまとめています...";
+            UI.statusText.innerHTML = "🔊 音声データの確定とAI文字起こしを並行して進めています...（数分かかることがあります）";
             UI.progressContainer.style.display = "block";
-            UI.progressTitle.innerHTML = "音声データを確定保存中...";
+            UI.progressTitle.innerHTML = "音声データの確定・AI文字起こし処理中...";
 
-            let audioResult = null;
-            try {
-                audioResult = await window.appController.finalizeAudioAndGetResult(meetingName);
-                console.log("🔊 音声確定結果:", audioResult);
-            } catch (audioErr) {
-                // 🌟 音声確定に失敗した場合は、ここで処理を止めてユーザーに知らせる。
-                //   文字起こしへ進んでも「音声さえ確保する」という最優先の目的を
-                //   達成できていないため、明確にエラーとして扱う。
-                console.error("❌ 音声確定処理が失敗しました:", audioErr);
-                UI.progressTitle.innerHTML = "⚠️ 音声の確定保存に失敗しました";
+            const [audioSettled, transcriptSettled] = await Promise.allSettled([
+                window.appController.finalizeAudioAndGetResult(meetingName),
+                window.appController.transcribeFromGeminiFileUris(meetingName, templateType)
+            ]);
+
+            const audioOk = audioSettled.status === 'fulfilled';
+            const transcriptOk = transcriptSettled.status === 'fulfilled' && !!transcriptSettled.value;
+
+            if (!audioOk) {
+                console.error("❌ 音声確定処理が失敗しました:", audioSettled.reason);
+            }
+            if (!transcriptOk) {
+                console.error(
+                    "❌ 文字起こし処理が失敗しました:",
+                    transcriptSettled.status === 'rejected' ? transcriptSettled.reason : "(結果なし)"
+                );
+            }
+
+            // 🌟 両方失敗した場合のみ、ここで処理を止めて明確にエラーを伝える。
+            //   どちらか一方でも成功していれば、その内容はDriveに残っている
+            //   ため、お助けモードから続きを再開できる。
+            if (!audioOk && !transcriptOk) {
+                UI.progressTitle.innerHTML = "⚠️ 音声確定・文字起こしの両方に失敗しました";
                 UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
                 UI.statusText.style.color = "#fa5252";
                 alert(
-                    "音声データの確定保存に失敗しました。\n" +
+                    "音声データの確定保存と、AI文字起こしの両方に失敗しました。\n" +
                     "録音のチャンク自体はドライブの「レコーダー/_一時録音中」フォルダに残っている" +
-                    "可能性がありますので、手動でご確認ください。\n\n詳細: " + audioErr.message
+                    "可能性がありますので、手動でご確認いただくか、「手動再開」からお試しください。\n\n" +
+                    "音声確定エラー: " + (audioOk ? "なし" : audioSettled.reason.message) + "\n" +
+                    "文字起こしエラー: " + (transcriptOk ? "なし" : (transcriptSettled.reason ? transcriptSettled.reason.message : "不明"))
                 );
-                return; // 🌟 音声確定に失敗した場合、文字起こしには進まない
+                return;
             }
 
-            // 🌟 ここまで来た時点で、音声は既に確定済み（最優先事項は達成済み）。
-            //   ここから先の文字起こし・議事録生成でエラーが起きても、
-            //   音声データ自体は失われない。
-            //
-            // 🌟 変更点（バグ修正・方式変更）：
-            //   録音中の個別チャンクを文字起こしに使うと、ヘッダーなし断片を
-            //   Geminiが誤って解釈し、文字起こし結果が壊れる不具合があったため、
-            //   確定済みの1本の音声ファイル（finalizeAudioAndGetResultの結果）
-            //   に対して文字起こしを行う方式に変更した。
-            UI.progressTitle.innerHTML = "🎉 音声データの保存が完了しました！";
-            UI.statusText.innerHTML = "✨ 続けてAIが文字起こし中...（音声全体をまとめて処理するため、数分かかることがあります）";
+            if (!audioOk) {
+                // 🌟 音声確定だけ失敗。文字起こし・議事録は既に完成しているため、
+                //   その旨を伝えつつ、音声原本の欠損リスクを警告する。
+                alert(
+                    "⚠️ 音声データの結合確定に失敗しましたが、文字起こし・議事録の生成は完了しました。\n" +
+                    "音声原本の確認が必要な場合は「手動再開」をお試しいただくか、ドライブの" +
+                    "「レコーダー/_一時録音中」フォルダをご確認ください。"
+                );
+            }
 
-            const result = await window.appController.transcribeFinalizedAudio(
-                meetingName,
-                templateType
-            );
-
-            if (!result) {
-                console.warn("⚠️ transcribeFinalizedAudioがスキップされました（多重実行防止）。");
-                // 🌟 文字起こしはスキップされたが、音声は既に確定済みなのでその旨を伝える
+            if (!transcriptOk) {
+                // 🌟 文字起こしだけ失敗。音声は確定済みのため、後から
+                //   「手動再開」で文字起こし・議事録を作り直せる。
                 UI.progressTitle.innerHTML = "🔊 音声データの保存は完了しています";
                 UI.statusText.innerHTML = "タップして新しい録音を開始";
                 UI.statusText.style.color = "#868e96";
                 UI.mainRecordBtn.style.display = "flex";
+                alert(
+                    "🔊 音声データの結合確定は完了しました！\n" +
+                    "ただし、AI文字起こし・議事録の生成には失敗しました。\n" +
+                    "「手動再開」から文字起こしを再度お試しいただけます。"
+                );
                 return;
             }
+
+            // 🌟 ここに到達するのは、音声確定・文字起こしの両方が成功したケース
+            const result = transcriptSettled.value;
 
             UI.progressTitle.innerHTML = "🎉 処理が完了しました！";
             UI.statusText.innerHTML = "タップして新しい録音を開始";
@@ -1162,6 +1376,15 @@
 
             if (result.audioWarning) {
                 alert("⚠️ 録音中に音声の一部保存でエラーが発生した可能性があります。音声データをご確認ください。");
+            }
+
+            if (result.transcriptionWarning) {
+                alert(
+                    "⚠️ 録音中に一部区間のAIアップロードが失敗していたため、その区間の内容は" +
+                    "文字起こし・議事録に反映されていません。（該当区間: セグメント " +
+                    (result.missingChunkIndexes || []).join(", ") + "）\n" +
+                    "該当区間の音声原本はドライブに保存されていますので、必要に応じてご確認ください。"
+                );
             }
 
             if (result.documentUrl) {
@@ -1177,15 +1400,13 @@
             }
 
         } catch (err) {
-            // 🌟 このcatchに到達するのは「音声確定は成功したが、それ以降で
-            //   想定外の例外が起きた」ケース（音声確定自体の失敗は上のtry/catchで
-            //   個別に処理済みのため、ここには来ない）。
+            // 🌟 このcatchに到達するのは、上記のPromise.allSettledの枠外で
+            //   想定外の例外が起きたケース。
             alert("エラーが発生しました: " + err.message + "\n（音声データは既に確定保存されている可能性があります）");
             UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
             UI.statusText.style.color = "#fa5252";
         } finally {
             // 🌟 念のための保険：異常終了時もWake Lock・ダークトーン・疑似スリープを確実に解除する
-            //   （音声確定・文字起こしいずれの段階で終わっても、ここで確実にスリープ防止を解除する）
             stopPseudoSleepCycle();
             releaseWakeLock();
             document.body.classList.remove('recording-active');
@@ -1197,6 +1418,16 @@
     }
 
     // 🌟 MediaRecorder.stop() を確実に待つヘルパー
+    //
+    // 🛠 2時間超対応版での注意点：
+    //   この関数は「現在進行中のセグメント（AppState.recorderが指す
+    //   インスタンス）」を停止させ、そのonstopハンドラ（startNewSegment
+    //   内で定義）の完了を待つ。
+    //   呼び出し前提として、AppState.isSegmentCycleActiveが既にfalseに
+    //   設定されていること（stopRecordingAndProcessで設定済み）。
+    //   これにより、onstopハンドラ内で「次のセグメントを自動開始する」
+    //   連鎖が発生しないことが保証された状態で、最後のセグメントの
+    //   確定だけを待てる。
     function waitForRecorderToStop() {
         return new Promise((resolve) => {
             if (!AppState.recorder || AppState.recorder.state !== "recording") {
@@ -1213,7 +1444,7 @@
             };
 
             AppState._onRecorderStopped = finalize;
-            AppState.recorder.stop(); // 🌟 これにより最後のondataavailableも発火してからonstopが呼ばれる
+            AppState.recorder.stop(); // 🌟 これによりondataavailableが発火してからonstopが呼ばれる
 
             // 保険：万一onstopが発火しない異常系でも最大5秒でタイムアウト
             setTimeout(finalize, 5000);
