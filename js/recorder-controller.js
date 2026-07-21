@@ -89,9 +89,12 @@ class RecorderController {
             //   ページ再読み込みや再開時にも判定できるよう永続化する。
             audioFinalized: false,
             audioUrl: null,
-            // 🌟 追加：確定済み音声ファイルのDriveファイルID。
-            //   お助けモード（緊急再開）専用。通常フローでは使わない。
-            audioFileId: null,
+            // 🌟 変更（案A・連番フォルダ保存方式）：
+            //   従来は「結合済み単一音声ファイルのID」を保持していたが、
+            //   案Aでは音声を結合しないため、代わりに「会議専用フォルダの
+            //   ID」を保持する。お助けモード（緊急再開）専用。
+            //   通常フローでは使わない。
+            audioFolderId: null,
             // 🌟 追加：録音時に使われたmimeType（appendAudioChunk時に記録される）。
             //   finalizeAudio呼び出し時に使う。
             mimeType: null,
@@ -307,7 +310,7 @@ class RecorderController {
             return {
                 audioFinalized: true,
                 audioUrl: this.state.audioUrl,
-                audioFileId: this.state.audioFileId,
+                audioFolderId: this.state.audioFolderId,
                 alreadyFinalized: true
             };
         }
@@ -340,22 +343,22 @@ class RecorderController {
 
                     const response = await this.callGasApi(payload);
 
-                    // 🌟 GAS側が「対象チャンクなし＝既に確定済みの可能性」と
-                    //   返してきた場合も、成功扱いとして進める
-                    //   （厳密にはチャンク未保存の異常系の可能性もあるが、
-                    //    音声保存自体はappendAudioChunk側で別途警告済みのため、
-                    //    ここで処理を止めずに先に進める）。
+                    // 🌟 変更（案A対応）：案Aでは音声結合を行わないため、
+                    //   GAS側の処理は「専用フォルダの存在・状態確認」のみとなる。
+                    //   これは録音中のappendAudioChunkの時点で実質的に既に
+                    //   完了している処理のため、通信さえ成功すればほぼ確実に成功する。
                     this.state.audioFinalized = true;
                     this.state.audioUrl = response.audioUrl || null;
-                    this.state.audioFileId = response.audioFileId || null;
+                    this.state.audioFolderId = response.audioFolderId || null;
                     this.saveState();
 
-                    console.log("✅ 音声の確定保存が完了しました。", response);
+                    console.log("✅ 音声データの確認が完了しました（案A：連番フォルダ保存）。", response);
 
                     return {
                         audioFinalized: response.audioFinalized !== false,
                         audioUrl: response.audioUrl || null,
-                        audioFileId: response.audioFileId || null,
+                        audioFolderId: response.audioFolderId || null,
+                        fileCount: response.fileCount,
                         alreadyFinalized: !!response.alreadyFinalized
                     };
 
@@ -369,8 +372,9 @@ class RecorderController {
             //   音声さえ確定できれば他の方法で議事録化できる、という運用方針の
             //   前提が崩れるケースのため、ユーザーに明確に知らせる必要がある。
             throw new Error(
-                "音声の確定保存に失敗しました。録音データはGoogleドライブの「_一時録音中」フォルダに" +
-                "チャンクとして残っている可能性があります。手動での確認をお願いします。詳細: " +
+                "音声データの確認に失敗しました。録音の各セグメントはGoogleドライブの" +
+                "「レコーダー/音声データ」フォルダ内の、会議名のついた専用フォルダに" +
+                "個別に残っている可能性があります。手動での確認をお願いします。詳細: " +
                 (lastError ? lastError.message : "不明なエラー")
             );
 
@@ -381,21 +385,18 @@ class RecorderController {
 
     // ==========================================
     // ⚠️ 非推奨（2時間超対応・逐次アップロード方式への移行に伴う変更）：
-    //   この関数は「音声結合（finalizeAudio）で確定した単一のWebMファイル」
-    //   を丸ごとGeminiに渡して文字起こしする方式で、チャンク単位の
-    //   ヘッダー問題は解決していたが、2時間超の長時間録音では以下の
-    //   2つの制約に抵触する：
-    //     ① GASのBlobサイズ上限（約50MB）を超えるとfinalizeAudio自体が失敗する
-    //     ② 長時間音声のアップロード＋ACTIVE待ちだけでGASの6分実行時間制限を
-    //        超える可能性がある
-    //   通常フローの主経路は、10分ごとに逐次Geminiアップロードしておき、
-    //   fileUriの配列だけを最後にまとめて渡す transcribeFromGeminiFileUris
-    //   に置き換えた。
-    //   この関数自体は、「お助けモード」で確定済み音声ファイルからの
-    //   緊急再開に使うため、後方互換として残している
-    //   （お助けモードの再開時点では、既にGemini側のfileUriが失効・
-    //   消失している可能性があるため、Drive上の音声原本から作り直す
-    //   経路が必要なため）。
+    //   この関数は、「専用フォルダ内の全ファイルをその場でGeminiへ
+    //   アップロードし直してから文字起こしする」緊急経路として使う。
+    //   「お助けモード」で、録音中に逐次アップロード済みのfileUriが
+    //   localStorageから失われている（別端末・別ブラウザからの再開等）
+    //   場合に、Drive上の専用フォルダから作り直す。
+    //
+    // ⚠️ 注意点：
+    //   専用フォルダ内の全ファイルをその場でアップロードし直すため、
+    //   通常フロー（録音中の逐次アップロード）に比べて、この経路は
+    //   GASの6分実行時間制限に近づくリスクがある（ファイル数が多いほど
+    //   顕著）。そのため、この関数は「通常運用の主経路」ではなく、
+    //   あくまで緊急の再開手段として位置づける。
     // ==========================================
     async transcribeFinalizedAudio(meetingName, templateType) {
         if (this.isProcessing) {
@@ -406,20 +407,20 @@ class RecorderController {
             console.warn("⚠️ transcribeFinalizedAudio: このセッションは既に確定済みのため、この呼び出しは無視します。");
             return null;
         }
-        if (!this.state.audioFileId) {
+        if (!this.state.audioFolderId) {
             throw new Error(
-                "音声ファイルがまだ確定していません。先に音声の確定保存を完了させてください。"
+                "音声の専用フォルダがまだ確認できていません。先に音声データの確認を完了させてください。"
             );
         }
 
         this.isProcessing = true;
 
         try {
-            console.log("🚀 確定済み音声ファイルからの文字起こしを開始します...", "audioFileId:", this.state.audioFileId);
+            console.log("🚀 専用フォルダ内の音声ファイルからの文字起こしを開始します...", "audioFolderId:", this.state.audioFolderId);
 
             const payload = {
                 action: "transcribeFromAudioFile",
-                audioFileId: this.state.audioFileId,
+                audioFolderId: this.state.audioFolderId,
                 mimeType: this.state.mimeType || 'audio/webm'
             };
 
@@ -444,7 +445,7 @@ class RecorderController {
 
             if (!response) {
                 throw new Error(
-                    "文字起こし処理に失敗しました。音声データ自体は確定保存済みのため失われていません。" +
+                    "文字起こし処理に失敗しました。音声データ自体は専用フォルダに保存済みのため失われていません。" +
                     "詳細: " + (lastError ? lastError.message : "不明なエラー")
                 );
             }
@@ -717,21 +718,21 @@ class RecorderController {
         return await this.finalizeAudioAndGetResult(meetingName);
     }
 
-    // 🌟 「状態B：音声は確定済みだが、文字起こし・議事録が未完了」からの再開。
-    //   チャンク単位のデータはlocalStorageに残っていない（またはbase64を
-    //   保持していない）前提のため、確定済みの音声ファイルを丸ごと
+    // 🌟 「状態B：音声は確認済みだが、文字起こし・議事録が未完了」からの再開。
+    //   localStorageにfileUri配列が残っていない（別端末・別ブラウザからの
+    //   再開等）場合に、Drive上の専用フォルダ内の全ファイルを丸ごと
     //   Geminiに渡して文字起こしをやり直す。
     //
     // 🛠 設計メモ：処理内容はtranscribeFinalizedAudio()と似ているが、
     //   お助けモードからの再開はセッション状態（isProcessing/hasFinalized等の
     //   インメモリフラグ）が失われている可能性がある前提のため、あえて
     //   finalizeSession()を経由せず、この関数内で完結させている。
-    async resumeFromTranscriptPending(audioFileId, mimeType, meetingName, templateType) {
-        console.log("🛠 お助けモード：確定済み音声ファイルからの文字起こし再開を試みます。audioFileId=", audioFileId);
+    async resumeFromTranscriptPending(audioFolderId, mimeType, meetingName, templateType) {
+        console.log("🛠 お助けモード：専用フォルダ内の音声ファイルからの文字起こし再開を試みます。audioFolderId=", audioFolderId);
 
         const payload = {
             action: "transcribeFromAudioFile",
-            audioFileId: audioFileId,
+            audioFolderId: audioFolderId,
             mimeType: mimeType || 'audio/webm'
         };
 
