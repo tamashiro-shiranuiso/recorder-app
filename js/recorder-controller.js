@@ -111,7 +111,15 @@ class RecorderController {
             //   Drive保存（appendAudioChunk）と異なり、こちらが失敗すると
             //   最終的な文字起こしにそのチャンクの内容が含まれなくなる
             //   ため、録音終了時にユーザーへ明示的に警告する。
-            geminiUploadFailures: []
+            geminiUploadFailures: [],
+            // 🌟 新設（優先度A・③：チャンク欠番検知）：
+            //   このセッションで実際に発行された（＝フロント側で
+            //   セグメントとして確定した）チャンクの総数。
+            //   0始まりのchunkIndexが 0, 1, 2, ... expectedChunkCount-1
+            //   まで存在するはず、という期待値として使う。
+            //   appendAudioChunk / uploadChunkToGeminiAndStore の
+            //   どちらか（先に呼ばれた方）が更新する。
+            expectedChunkCount: 0
         };
     }
 
@@ -190,6 +198,14 @@ class RecorderController {
             this.state.mimeType = mimeType || 'audio/webm';
         }
 
+        // 🌟 新設（優先度A・③：チャンク欠番検知）：
+        //   このセッションで発行されたチャンクの最大個数を更新する。
+        //   chunkIndexは0始まりのため、個数としては+1する。
+        if (chunkIndex + 1 > this.state.expectedChunkCount) {
+            this.state.expectedChunkCount = chunkIndex + 1;
+            this.saveState();
+        }
+
         const payload = {
             action: "appendAudioChunk",
             sessionId: this.state.sessionId,
@@ -243,6 +259,15 @@ class RecorderController {
     //   ため、内容自体が完全に失われるわけではない）。
     // ==========================================
     async uploadChunkToGeminiAndStore(base64Data, mimeType, chunkIndex) {
+        // 🌟 新設（優先度A・③：チャンク欠番検知）：
+        //   appendAudioChunkと同様、こちらでも念のため更新しておく
+        //   （どちらが先に呼ばれても正しく最大値が記録されるように、
+        //   Math.maxで安全に比較する）。
+        if (chunkIndex + 1 > this.state.expectedChunkCount) {
+            this.state.expectedChunkCount = chunkIndex + 1;
+            this.saveState();
+        }
+
         const payload = {
             action: "uploadChunkToGemini",
             audioData: base64Data,
@@ -461,6 +486,47 @@ class RecorderController {
     }
 
     // ==========================================
+    // 🌟 新設（優先度A・③：チャンク欠番検知）
+    //
+    // 🛠 目的：
+    //   録音中、通信障害等により特定のチャンクだけがGeminiへの
+    //   アップロードに失敗すると、そのチャンクの内容は文字起こしに
+    //   反映されない。従来はgeminiUploadFailuresへの記録による検知の
+    //   みだったが、これは「アップロードのAPI呼び出し自体が失敗した」
+    //   ケースしか捉えられない。
+    //
+    //   万が一、何らかの理由でアップロードのAPI呼び出し自体は成功した
+    //   ように見えても、実際にはchunkIndexの記録が欠落する、あるいは
+    //   フロント側のイベント発火順序に異常があった場合でも検知できる
+    //   よう、「本来 0 〜 expectedChunkCount-1 まで揃っているはずの
+    //   連番のうち、実際にgeminiFileUrisに記録されているのはどれか」を
+    //   直接突き合わせて欠番を割り出す。
+    //
+    // 🛡️ 設計方針：
+    //   この関数は検知するだけで、自動修復は行わない（欠落した音声
+    //   そのものを後から復元する手段がないため）。呼び出し元
+    //   （UI側）が、検知結果をもとにユーザーへ警告する。
+    // ==========================================
+    detectMissingChunks() {
+        const expectedCount = this.state.expectedChunkCount || 0;
+        if (expectedCount === 0) {
+            return [];
+        }
+
+        const presentIndexes = new Set(
+            (this.state.geminiFileUris || []).map(entry => entry.chunkIndex)
+        );
+
+        const missing = [];
+        for (let i = 0; i < expectedCount; i++) {
+            if (!presentIndexes.has(i)) {
+                missing.push(i);
+            }
+        }
+        return missing;
+    }
+
+    // ==========================================
     // 🌟 新設（2時間超対応・逐次アップロード方式）：通常フローの主経路
     //
     // 🛠 目的：
@@ -490,6 +556,16 @@ class RecorderController {
             throw new Error(
                 "文字起こし対象の音声データがGeminiにアップロードされていません。" +
                 "録音が正しく行われたかご確認ください。"
+            );
+        }
+
+        // 🌟 新設（優先度A・③）：欠番があれば、処理を止めずに警告情報として
+        //   記録しておく（音声原本はDriveに残っているため、致命的ではない）。
+        const missingChunks = this.detectMissingChunks();
+        if (missingChunks.length > 0) {
+            console.warn(
+                `⚠️ チャンク欠番を検知しました: [${missingChunks.join(", ")}]。` +
+                `該当区間は文字起こしに反映されません（音声原本はDriveに残っています）。`
             );
         }
 
@@ -803,20 +879,34 @@ class RecorderController {
                 resultData.audioWarning = true;
             }
 
-            // 🌟 新設（2時間超対応・逐次アップロード方式）：
+            // 🌟 新設（2時間超対応・逐次アップロード方式、および優先度A・③：
+            //   チャンク欠番検知）：
             //   Geminiアップロードに失敗したチャンクがあった場合、
             //   そのチャンクの発言内容は文字起こしに含まれていない
             //   （Drive上の音声原本には残っているため、内容が完全に
             //   失われるわけではないが、議事録には反映されていない）。
             //   このことをユーザーに明示的に警告する。
-            if (this.state.geminiUploadFailures && this.state.geminiUploadFailures.length > 0) {
+            //
+            //   欠番の情報源は2つある：
+            //   ① geminiUploadFailures … アップロードのAPI呼び出し自体が
+            //      明示的に失敗として記録されたケース
+            //   ② detectMissingChunks() … 期待されるチャンク総数
+            //      （expectedChunkCount）と、実際にgeminiFileUrisに
+            //      記録されている件数を直接突き合わせて検知するケース
+            //      （①では捉えられない、記録漏れ等の異常も検知できる）
+            //   両方を統合し、重複のない欠番リストとしてユーザーに示す。
+            const failureIndexes = (this.state.geminiUploadFailures || []).map(f => f.chunkIndex);
+            const detectedMissing = this.detectMissingChunks();
+            const missingChunkIndexes = [...new Set([...failureIndexes, ...detectedMissing])].sort((a, b) => a - b);
+
+            if (missingChunkIndexes.length > 0) {
                 console.warn(
-                    "⚠️ 録音中に一部のチャンクでGeminiアップロードが失敗していました。" +
+                    "⚠️ 録音中に一部のチャンクが欠落していました。" +
                     "該当区間の内容は文字起こし・議事録に反映されていません。",
-                    this.state.geminiUploadFailures
+                    missingChunkIndexes
                 );
                 resultData.transcriptionWarning = true;
-                resultData.missingChunkIndexes = this.state.geminiUploadFailures.map(f => f.chunkIndex);
+                resultData.missingChunkIndexes = missingChunkIndexes;
             }
 
             this.clearState();
