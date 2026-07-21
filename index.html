@@ -587,18 +587,22 @@
     }
 
     // ==========================================
-    // 🛠 お助けモード：自動再開ロジック
+    // 🛠 お助けモード：自動再開ロジック（案A・連番フォルダ保存方式対応）
     //
     // 🛠 設計方針：
     //   ユーザーにGoogleドライブのリンクやパスを入力させることはしない。
     //   録音時に発行され、localStorageに保存されている sessionId を使い、
-    //   GAS側に「このsessionIdは今どの段階まで完了しているか」を問い合わせ、
-    //   その結果に応じて「① 音声結合からの再開」「② 文字起こし・議事録
-    //   生成からの再開」のどちらであるかを画面に明示したうえで再開する。
+    //   GAS側に「このsessionIdの音声データが見つかるか」を問い合わせ、
+    //   結果を画面に明示したうえで再開する。
     //
-    //   状態は必ず次のいずれかとして、ユーザーに分かる言葉で表示する：
-    //     ・音声データの結合確定（1本化）が完了していない状態
-    //     ・音声は確定済みだが、文字起こし・議事録がまだの状態
+    //   案Aでは音声を結合しないため、従来あった「音声結合が未完了」
+    //   という状態区分自体がなくなった。録音中の音声は常に最初から
+    //   最終的な保存場所（専用フォルダ）に置かれているため、状態は
+    //   次のいずれかとして、ユーザーに分かる言葉で表示する：
+    //     ・（ローカルにアップロード済みfileUriが残っている）
+    //       即座に文字起こし・議事録の生成から再開できる状態
+    //     ・音声は専用フォルダに保存済みだが、文字起こし・議事録の
+    //       生成をやり直す必要がある状態
     //     ・再開できる前回の録音データが見つからない状態
     // ==========================================
     async function checkRecoveryStatus() {
@@ -654,40 +658,43 @@
         }
     }
 
+    // 🌟 変更点（案A・連番フォルダ保存方式）：
+    //   従来は「音声結合が未完了(audio_pending)」という状態を持って
+    //   いたが、案Aでは音声を結合しないため、この状態区分自体が
+    //   なくなった。録音中の音声は常に最初から最終的な保存場所
+    //   （専用フォルダ）に置かれているため、判定は
+    //   「音声は保存済み(audio_saved)」か「データが見当たらない
+    //   (not_found)」かのシンプルな2択になった。
     function renderRecoveryStatus(statusResult) {
         const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
         const templateType = UI.templateSelect.value;
 
-        if (statusResult.status === "audio_pending") {
-            // 🌟 状態①：音声データの結合確定（1本化）がまだ完了していない
+        if (statusResult.status === "audio_saved") {
+            // 🌟 音声は専用フォルダに保存済み。文字起こし・議事録の生成から再開する。
             UI.recoveryStatusText.innerHTML =
-                `🔊 <b>「音声データの結合確定」が未完了です。</b><br>` +
-                `録音の断片（${statusResult.pendingChunkCount}個）がサーバーに保存された状態で止まっています。<br>` +
-                `まずは音声を1本にまとめる処理から再開します。`;
-            UI.recoveryActionBtn.textContent = "① 音声データの結合確定から再開する";
-            UI.recoveryActionBtn.style.display = "block";
-            UI.recoveryActionBtn.onclick = () => runRecoveryAudioPending(meetingName, templateType);
-
-        } else if (statusResult.status === "audio_done_transcript_pending") {
-            // 🌟 状態②：音声は確定済み。文字起こし・議事録がまだ
-            UI.recoveryStatusText.innerHTML =
-                `✅ <b>音声データはすでに1本化・確定済みです。</b>（ファイル名: ${statusResult.audioFileName}）<br>` +
+                `✅ <b>音声データは専用フォルダに保存済みです。</b>` +
+                `（フォルダ名: ${statusResult.audioFileName}、ファイル数: ${statusResult.fileCount}件）<br>` +
                 `🔊 音声データ自体は失われていません。<br>` +
-                `文字起こし・議事録の生成だけが未完了のため、そこから再開します。`;
-            UI.recoveryActionBtn.textContent = "② 文字起こし・議事録の生成から再開する";
+                `文字起こし・議事録の生成から再開します。`;
+            UI.recoveryActionBtn.textContent = "文字起こし・議事録の生成から再開する";
             UI.recoveryActionBtn.style.display = "block";
             UI.recoveryActionBtn.onclick = () => runRecoveryTranscriptPending(
-                statusResult.audioFileId, meetingName, templateType
+                statusResult.audioFolderId, meetingName, templateType
             );
 
         } else {
-            // 🌟 状態③：サーバー側にもデータが見当たらない
+            // 🌟 サーバー側にもデータが見当たらない
             UI.recoveryStatusText.innerHTML =
                 "⚠️ サーバー側にも、このセッションに対応する録音データが見つかりませんでした。<br>" +
-                "お手数ですが、Googleドライブの「レコーダー」フォルダを直接ご確認ください。";
+                "お手数ですが、Googleドライブの「レコーダー/音声データ」フォルダを直接ご確認ください。";
         }
     }
 
+    // ⚠️ 非推奨（案A・連番フォルダ保存方式への移行に伴う変更）：
+    //   この関数は「音声結合が未完了(audio_pending)」という状態からの
+    //   再開を担っていたが、案Aでは音声を結合しないため、この状態区分
+    //   自体がなくなった（renderRecoveryStatusから呼び出されなくなった）。
+    //   後方互換のため関数自体は残している。
     async function runRecoveryAudioPending(meetingName, templateType) {
         UI.recoveryActionBtn.disabled = true;
         UI.recoveryStatusText.innerHTML = "🔊 音声データを1本にまとめています...";
@@ -701,7 +708,7 @@
             //   作り直す緊急経路（transcribeFinalizedAudio）にフォールバックする。
             if (window.appController.hasPendingGeminiFileUris()) {
                 UI.recoveryStatusText.innerHTML =
-                    `✅ 音声データの結合確定が完了しました！<br>` +
+                    `✅ 音声データの確認が完了しました！<br>` +
                     `続けて文字起こし・議事録の生成に進みます...（数分かかることがあります）`;
 
                 const result = await window.appController.transcribeFromGeminiFileUris(
@@ -712,12 +719,12 @@
                     finishRecoveryUI(result);
                 } else {
                     UI.recoveryStatusText.innerHTML =
-                        "✅ 音声データの結合確定は完了しました。（文字起こしは別途「手動再開」から再度お試しください）";
+                        "✅ 音声データの確認は完了しました。（文字起こしは別途「手動再開」から再度お試しください）";
                 }
             } else {
                 UI.recoveryStatusText.innerHTML =
-                    `✅ 音声データの結合確定が完了しました！<br>` +
-                    `AIアップロード済みのデータが見つからないため、確定済みの音声ファイルから` +
+                    `✅ 音声データの確認が完了しました！<br>` +
+                    `AIアップロード済みのデータが見つからないため、専用フォルダ内の音声ファイルから` +
                     `文字起こしをやり直します...（音声全体をまとめて処理するため、数分かかることがあります）`;
 
                 const result = await window.appController.transcribeFinalizedAudio(
@@ -728,14 +735,14 @@
                     finishRecoveryUI(result);
                 } else {
                     UI.recoveryStatusText.innerHTML =
-                        "✅ 音声データの結合確定は完了しました。（文字起こしは別途「手動再開」から再度お試しください）";
+                        "✅ 音声データの確認は完了しました。（文字起こしは別途「手動再開」から再度お試しください）";
                 }
             }
         } catch (err) {
-            console.error("❌ お助けモード：音声結合の再開に失敗しました", err);
+            console.error("❌ お助けモード：音声確認の再開に失敗しました", err);
             UI.recoveryStatusText.innerHTML =
-                "⚠️ 音声データの結合確定に失敗しました。もう一度お試しいただくか、" +
-                "Googleドライブの「レコーダー/_一時録音中」フォルダをご確認ください。<br>詳細: " + err.message;
+                "⚠️ 音声データの確認に失敗しました。もう一度お試しいただくか、" +
+                "Googleドライブの「レコーダー/音声データ」フォルダをご確認ください。<br>詳細: " + err.message;
         } finally {
             UI.recoveryActionBtn.disabled = false;
         }
@@ -771,9 +778,9 @@
         }
     }
 
-    async function runRecoveryTranscriptPending(audioFileId, meetingName, templateType) {
+    async function runRecoveryTranscriptPending(audioFolderId, meetingName, templateType) {
         UI.recoveryActionBtn.disabled = true;
-        UI.recoveryStatusText.innerHTML = "✨ 確定済みの音声データからAIが文字起こし中です...";
+        UI.recoveryStatusText.innerHTML = "✨ 専用フォルダ内の音声データからAIが文字起こし中です...";
 
         try {
             // 🌟 修正：AppState.mimeTypeはページ再読み込み後は初期値
@@ -782,7 +789,7 @@
             //   を優先して使う。
             const mimeType = window.appController.state.mimeType || AppState.mimeType;
             const result = await window.appController.resumeFromTranscriptPending(
-                audioFileId, mimeType, meetingName, templateType
+                audioFolderId, mimeType, meetingName, templateType
             );
             finishRecoveryUI(result);
         } catch (err) {
@@ -1297,14 +1304,17 @@
             const templateType = UI.templateSelect.value;
 
             // ==========================================
-            // 🌟 2時間超対応：Drive音声結合とGemini文字起こしを並行実行する。
-            //   両者は完全に独立した処理（前者はDriveの一時ファイルを対象、
-            //   後者はGemini側に既にアップロード済みのfileUriを対象）のため、
-            //   互いの成否・完了タイミングに依存しない。
+            // 🌟 2時間超対応・案A対応：音声データの保存確認とGemini文字起こしを
+            //   並行実行する。両者は完全に独立した処理（前者はDrive上の
+            //   専用フォルダの状態確認、後者はGemini側に既にアップロード
+            //   済みのfileUriを対象）のため、互いの成否・完了タイミングに
+            //   依存しない。
+            //   案Aでは音声の各セグメントはappendAudioChunkの時点で既に
+            //   Driveへ保存済みのため、ここでの「確認」処理はごく軽量。
             // ==========================================
-            UI.statusText.innerHTML = "🔊 音声データの確定とAI文字起こしを並行して進めています...（数分かかることがあります）";
+            UI.statusText.innerHTML = "🔊 音声データの保存確認とAI文字起こしを並行して進めています...（数分かかることがあります）";
             UI.progressContainer.style.display = "block";
-            UI.progressTitle.innerHTML = "音声データの確定・AI文字起こし処理中...";
+            UI.progressTitle.innerHTML = "音声データの確認・AI文字起こし処理中...";
 
             const [audioSettled, transcriptSettled] = await Promise.allSettled([
                 window.appController.finalizeAudioAndGetResult(meetingName),
@@ -1325,29 +1335,36 @@
             }
 
             // 🌟 両方失敗した場合のみ、ここで処理を止めて明確にエラーを伝える。
-            //   どちらか一方でも成功していれば、その内容はDriveに残っている
-            //   ため、お助けモードから続きを再開できる。
+            //   ただし案Aでは、音声の各セグメントはappendAudioChunkの時点で
+            //   既にDrive上の専用フォルダへ直接保存されているため、
+            //   「音声確定（finalizeAudioAndGetResult）」の失敗は、単に
+            //   フォルダの存在確認通信が失敗しただけであり、音声データ
+            //   自体が失われたことを意味しない。
             if (!audioOk && !transcriptOk) {
-                UI.progressTitle.innerHTML = "⚠️ 音声確定・文字起こしの両方に失敗しました";
+                UI.progressTitle.innerHTML = "⚠️ 音声確認・文字起こしの両方に失敗しました";
                 UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
                 UI.statusText.style.color = "#fa5252";
                 alert(
-                    "音声データの確定保存と、AI文字起こしの両方に失敗しました。\n" +
-                    "録音のチャンク自体はドライブの「レコーダー/_一時録音中」フォルダに残っている" +
-                    "可能性がありますので、手動でご確認いただくか、「手動再開」からお試しください。\n\n" +
-                    "音声確定エラー: " + (audioOk ? "なし" : audioSettled.reason.message) + "\n" +
+                    "音声データの確認と、AI文字起こしの両方に失敗しました。\n" +
+                    "録音の各セグメントは、録音中にドライブの「レコーダー/音声データ」フォルダ内の" +
+                    "会議名のついた専用フォルダへ、既に個別保存されている可能性が高いです。" +
+                    "お手数ですが、まずはそちらをご確認いただくか、「手動再開」からお試しください。\n\n" +
+                    "音声確認エラー: " + (audioOk ? "なし" : audioSettled.reason.message) + "\n" +
                     "文字起こしエラー: " + (transcriptOk ? "なし" : (transcriptSettled.reason ? transcriptSettled.reason.message : "不明"))
                 );
                 return;
             }
 
             if (!audioOk) {
-                // 🌟 音声確定だけ失敗。文字起こし・議事録は既に完成しているため、
-                //   その旨を伝えつつ、音声原本の欠損リスクを警告する。
+                // 🌟 音声確認だけ失敗。文字起こし・議事録は既に完成しているため、
+                //   その旨を伝える。案Aでは音声原本自体は録音中に既に
+                //   保存済みのため、ここでの失敗は「フォルダの状態確認通信」の
+                //   失敗であり、音声データの消失を意味しない。
                 alert(
-                    "⚠️ 音声データの結合確定に失敗しましたが、文字起こし・議事録の生成は完了しました。\n" +
-                    "音声原本の確認が必要な場合は「手動再開」をお試しいただくか、ドライブの" +
-                    "「レコーダー/_一時録音中」フォルダをご確認ください。"
+                    "⚠️ 音声データの状態確認に失敗しましたが、文字起こし・議事録の生成は完了しました。\n" +
+                    "音声原本は録音中にドライブへ既に保存されているはずです。確認が必要な場合は" +
+                    "「手動再開」をお試しいただくか、ドライブの「レコーダー/音声データ」フォルダ内の" +
+                    "専用フォルダをご確認ください。"
                 );
             }
 
@@ -1359,14 +1376,14 @@
                 UI.statusText.style.color = "#868e96";
                 UI.mainRecordBtn.style.display = "flex";
                 alert(
-                    "🔊 音声データの結合確定は完了しました！\n" +
+                    "🔊 音声データの保存は確認できました！\n" +
                     "ただし、AI文字起こし・議事録の生成には失敗しました。\n" +
                     "「手動再開」から文字起こしを再度お試しいただけます。"
                 );
                 return;
             }
 
-            // 🌟 ここに到達するのは、音声確定・文字起こしの両方が成功したケース
+            // 🌟 ここに到達するのは、音声確認・文字起こしの両方が成功したケース
             const result = transcriptSettled.value;
 
             UI.progressTitle.innerHTML = "🎉 処理が完了しました！";
