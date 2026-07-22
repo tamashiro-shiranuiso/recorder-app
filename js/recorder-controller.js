@@ -114,7 +114,14 @@ const DiagnosticsReporter = {
     },
 
     // 🌟 レポートを (a) コンソール出力 (b) window.lastDiagnosticsTextへの保持
-    //   (c) UIパネルへの表示、まとめて行う。
+    //   (c) UIパネルへのテキスト反映、まとめて行う。
+    //
+    // 🛠 UI崩れ対策（レビュー後の調整）：
+    //   当初は毎回の完了時にパネルを強制的に開いていたが、これだと
+    //   正常終了時にも画面がガチャッと切り替わって煩雑に見えるため、
+    //   「テキストの中身は常に最新化する」が「パネルを勝手に開くのは
+    //   異常時（finishReasonがSTOP以外）のみ」に変更した。
+    //   正常時はボタン（🩺診断）を押した時にだけ表示すれば十分。
     report: function(label, transcriptResult, minutesDiagnostics) {
         const reportText = this.formatReport(label, transcriptResult, minutesDiagnostics);
 
@@ -124,13 +131,27 @@ const DiagnosticsReporter = {
         // (b) グローバル変数へ保持（コンソールから copy(window.lastDiagnosticsText) 可能）
         window.lastDiagnosticsText = reportText;
 
-        // (c) UIパネルがあれば、そこにも表示する（index.html側で要素があれば拾う）
-        const panel = document.getElementById('diagnosticsText');
-        if (panel) {
-            panel.value = reportText;
+        // (c) UIパネルのテキストは常に最新化しておく（表示するかは別判断）
+        const textarea = document.getElementById('diagnosticsText');
+        if (textarea) {
+            textarea.value = reportText;
+        }
+
+        // 🌟 異常（finishReasonがSTOP以外）を検知した場合のみ、
+        //   ユーザーが気づけるようパネルを自動的に開く。
+        const hasAbnormalFinish =
+            (transcriptResult && transcriptResult.finishReason && transcriptResult.finishReason !== "STOP") ||
+            (minutesDiagnostics && minutesDiagnostics.finishReason && minutesDiagnostics.finishReason !== "STOP");
+
+        if (hasAbnormalFinish) {
             const wrapper = document.getElementById('diagnosticsPanel');
+            const btn = document.getElementById('showDiagnosticsBtn');
             if (wrapper) {
                 wrapper.style.display = 'block';
+                wrapper.classList.add('fade-in');
+            }
+            if (btn) {
+                btn.classList.add('active-panel');
             }
         }
 
