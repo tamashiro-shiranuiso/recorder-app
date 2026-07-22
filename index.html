@@ -329,6 +329,39 @@
         
         .fade-in { animation: fadeIn 0.4s ease forwards; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* ==========================================
+           🎨 診断情報パネル（finishReason等の確認用）
+           🌟 新設（診断ログ強化対応）：
+           文字起こし・議事録生成の処理結果（finishReason・トークン数等）を
+           表示し、そのままAIへの不具合報告としてコピペできるようにするパネル。
+           ========================================== */
+        .recovery-panel.diagnostics {
+            display: none;
+        }
+        .recovery-panel.diagnostics h4 {
+            color: #495057;
+        }
+        .diagnostics-textarea {
+            width: 100%;
+            box-sizing: border-box;
+            height: 220px;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            padding: 12px;
+            border: 2px solid #f1f3f5;
+            border-radius: 12px;
+            background-color: #f8f9fa;
+            color: #495057;
+            resize: vertical;
+            white-space: pre;
+        }
+        body.recording-active .diagnostics-textarea {
+            background-color: #2a2d33;
+            border-color: #3a3d44;
+            color: #d0d3d8;
+        }
     </style>
 </head>
 <body>
@@ -337,6 +370,9 @@
     <div class="header">
         <h2>🎙 レコーダー</h2>
         <div class="header-actions">
+            <button class="btn-pill" title="診断情報を確認する" id="showDiagnosticsBtn">
+                <span>🩺</span> 診断
+            </button>
             <button class="btn-pill" title="手動で途中から再開する" id="showRecoveryBtn">
                 <span>🛠</span> 手動再開
             </button>
@@ -400,6 +436,17 @@
         <button class="recovery-btn" id="recoveryActionBtn" style="display:none;"></button>
     </div>
 
+    <!-- 🌟 新設（診断ログ強化対応）：診断情報パネル（finishReason・トークン数などの確認用） -->
+    <div class="recovery-panel diagnostics" id="diagnosticsPanel">
+        <h4>🩺 診断情報（AIへの共有用）</h4>
+        <div style="font-size: 12px; color: #868e96; margin-bottom: 10px; line-height: 1.6;">
+            文字起こし・議事録生成の処理結果（finishReason・トークン数等）です。<br>
+            「途中で止まった」等の不具合報告の際は、このテキストをそのままコピーして共有してください。
+        </div>
+        <textarea class="diagnostics-textarea" id="diagnosticsText" readonly placeholder="録音・文字起こし・議事録生成が完了すると、ここに診断情報が表示されます。"></textarea>
+        <button class="recovery-btn" id="copyDiagnosticsBtn">📋 診断情報をコピー</button>
+    </div>
+
     <!-- システム設定パネル -->
     <div class="recovery-panel settings" id="settingsPanel">
         <h4>⚙️ システム設定</h4>
@@ -420,28 +467,13 @@
     </div>
 </div>
 
-<!-- キャッシュ強制回避用のバージョン記述を追加(v=4.0 音声優先確定対応版) -->
-<script src="js/recorder-controller.js?v=4.0"></script>
+<!-- キャッシュ強制回避用のバージョン記述を追加(v=5.0 診断ログ強化対応版) -->
+<script src="js/recorder-controller.js?v=5.0"></script>
 
 <script>
     // ==========================================
     // 🔧 設定と状態管理
     // ==========================================
-    // 🛠 2時間超対応版（逐次アップロード方式）：
-    //   ・従来のtimeslice方式（1個のMediaRecorderをtimesliceで区切る）は
-    //     廃止した。最初のチャンクだけが正しいWebMヘッダーを持ち、
-    //     2個目以降はヘッダーなしの断片になるという構造的な問題があり、
-    //     これがGeminiの誤った文字起こし（重複・文脈破綻）の原因だった。
-    //   ・新方式：SEGMENT_INTERVAL_MSごとに、MediaRecorderを
-    //     「完全停止→即座に新しいインスタンスで再開」する。
-    //     stop()時にondataavailableが1回だけ発火し、それが「正しい
-    //     ヘッダーを持つ、完全で独立した1本のWebMファイル」になる。
-    //   ・確定した各セグメントは、Drive保存（appendAudioChunk）と
-    //     Geminiアップロード（uploadChunkToGeminiAndStore）の両方に、
-    //     非同期で並行して送信される。
-    //   ・切り替え時に生じる一瞬の録音の途切れ（数百ミリ秒程度）は、
-    //     文字起こし側のプロンプトで「ファイル境界での自然な補完」を
-    //     指示することで、実用上の影響を抑えている。
     const APP_CONFIG = {
         SEGMENT_INTERVAL_MS: 600000, // 本番運用: 10分（テストする場合は短い値に変更してください）
         PSEUDO_SLEEP_DELAY_MS: 15000 // 🌟 追加：録音中、操作がないままこの時間が経つと疑似スリープ表示になる
@@ -450,28 +482,18 @@
     const AppState = {
         isRecording: false,
         isStopping: false,
-        // 🌟 変更点（2時間超対応）：recorderは「現在進行中のセグメント」の
-        //   MediaRecorderインスタンスを指す。SEGMENT_INTERVAL_MSごとに
-        //   完全停止→新しいインスタンスに差し替えられる（使い捨て）。
         recorder: null,
         globalStream: null,
-        chunkIndex: 0,              // セグメント（10分単位）の通し番号
+        chunkIndex: 0,
         mimeType: 'audio/webm',
         recordingStartedAt: null,
         elapsedTimerId: null,
-        wakeLock: null,              // 🌟 追加：画面スリープ防止用のWake Lockオブジェクト
-        wakeLockSupported: 'wakeLock' in navigator,  // 🌟 追加：端末がWake Lock APIに対応しているか
-        pseudoSleepTimerId: null,    // 🌟 追加：疑似スリープ発動までの無操作タイマー
-        isPseudoSleeping: false,     // 🌟 追加：現在疑似スリープ表示中かどうか
-        // 🌟 追加：appendAudioChunk / uploadChunkToGeminiAndStore の送信を
-        //   順番通りに実行するためのキュー（各セグメント確定のたびに繋げる）
+        wakeLock: null,
+        wakeLockSupported: 'wakeLock' in navigator,
+        pseudoSleepTimerId: null,
+        isPseudoSleeping: false,
         audioSendQueue: Promise.resolve(),
-        // 🌟 新設（2時間超対応）：次のセグメント切り替えを予約するタイマーID。
-        //   stopRecordingAndProcess側で確実にクリアする必要がある。
         segmentTimerId: null,
-        // 🌟 新設（2時間超対応）：ユーザーが「録音終了」を押したかどうかを示す
-        //   フラグ。セグメントのonstopハンドラ内で「次のセグメントを
-        //   自動的に開始すべきか」を判定するために使う。
         isSegmentCycleActive: false
     };
 
@@ -497,7 +519,12 @@
         settingsBtn: document.getElementById('settingsBtn'),
         settingsPanel: document.getElementById('settingsPanel'),
         gasUrlInput: document.getElementById('gasUrlInput'),
-        saveSettingsBtn: document.getElementById('saveSettingsBtn')
+        saveSettingsBtn: document.getElementById('saveSettingsBtn'),
+        // 🌟 新設（診断ログ強化対応）
+        showDiagnosticsBtn: document.getElementById('showDiagnosticsBtn'),
+        diagnosticsPanel: document.getElementById('diagnosticsPanel'),
+        diagnosticsText: document.getElementById('diagnosticsText'),
+        copyDiagnosticsBtn: document.getElementById('copyDiagnosticsBtn')
     };
 
     // ==========================================
@@ -558,6 +585,7 @@
             if(UI.recoveryPanel.style.display === 'block') {
                 UI.recoveryPanel.classList.add('fade-in');
                 UI.settingsPanel.style.display = 'none';
+                UI.diagnosticsPanel.style.display = 'none';
                 checkRecoveryStatus();
             }
         });
@@ -567,6 +595,7 @@
             if(UI.settingsPanel.style.display === 'block') {
                 UI.settingsPanel.classList.add('fade-in');
                 UI.recoveryPanel.style.display = 'none';
+                UI.diagnosticsPanel.style.display = 'none';
                 UI.gasUrlInput.value = window.appController ? window.appController.gasUrl : "";
             }
         });
@@ -583,27 +612,53 @@
             }
         });
 
+        // 🌟 新設（診断ログ強化対応）：診断パネルの開閉
+        //   recorder-controller.js の DiagnosticsReporter.report() が
+        //   #diagnosticsPanel / #diagnosticsText を直接操作して自動表示するが、
+        //   ユーザーが手動でいつでも開けるよう、このボタンからも開閉できるようにする。
+        if (UI.showDiagnosticsBtn) {
+            UI.showDiagnosticsBtn.addEventListener('click', () => {
+                UI.diagnosticsPanel.style.display = UI.diagnosticsPanel.style.display === 'block' ? 'none' : 'block';
+                if (UI.diagnosticsPanel.style.display === 'block') {
+                    UI.diagnosticsPanel.classList.add('fade-in');
+                    UI.recoveryPanel.style.display = 'none';
+                    UI.settingsPanel.style.display = 'none';
+                    // 🌟 既に保持されている診断情報があれば表示する
+                    if (window.lastDiagnosticsText) {
+                        UI.diagnosticsText.value = window.lastDiagnosticsText;
+                    }
+                }
+            });
+        }
+
+        // 🌟 新設（診断ログ強化対応）：診断情報コピー・ボタン
+        if (UI.copyDiagnosticsBtn) {
+            UI.copyDiagnosticsBtn.addEventListener('click', async () => {
+                const text = window.lastDiagnosticsText || UI.diagnosticsText.value;
+                if (!text) {
+                    alert("まだ診断情報がありません。録音・文字起こしを一度実行してください。");
+                    return;
+                }
+                try {
+                    await navigator.clipboard.writeText(text);
+                    UI.copyDiagnosticsBtn.textContent = "✅ コピーしました！";
+                } catch (err) {
+                    // クリップボードAPIが使えない環境向けのフォールバック
+                    UI.diagnosticsText.select();
+                    document.execCommand('copy');
+                    UI.copyDiagnosticsBtn.textContent = "✅ コピーしました！";
+                }
+                setTimeout(() => {
+                    UI.copyDiagnosticsBtn.textContent = "📋 診断情報をコピー";
+                }, 2000);
+            });
+        }
+
         UI.mainRecordBtn.addEventListener('click', handleRecordButtonClick);
     }
 
     // ==========================================
     // 🛠 お助けモード：自動再開ロジック（案A・連番フォルダ保存方式対応）
-    //
-    // 🛠 設計方針：
-    //   ユーザーにGoogleドライブのリンクやパスを入力させることはしない。
-    //   録音時に発行され、localStorageに保存されている sessionId を使い、
-    //   GAS側に「このsessionIdの音声データが見つかるか」を問い合わせ、
-    //   結果を画面に明示したうえで再開する。
-    //
-    //   案Aでは音声を結合しないため、従来あった「音声結合が未完了」
-    //   という状態区分自体がなくなった。録音中の音声は常に最初から
-    //   最終的な保存場所（専用フォルダ）に置かれているため、状態は
-    //   次のいずれかとして、ユーザーに分かる言葉で表示する：
-    //     ・（ローカルにアップロード済みfileUriが残っている）
-    //       即座に文字起こし・議事録の生成から再開できる状態
-    //     ・音声は専用フォルダに保存済みだが、文字起こし・議事録の
-    //       生成をやり直す必要がある状態
-    //     ・再開できる前回の録音データが見つからない状態
     // ==========================================
     async function checkRecoveryStatus() {
         UI.recoveryActionBtn.style.display = "none";
@@ -621,15 +676,6 @@
             return;
         }
 
-        // ==========================================
-        // 🌟 新設（2時間超対応・逐次アップロード方式）：
-        //   まずローカル（localStorage）だけで判定できる情報を確認する。
-        //   録音中に逐次アップロード済みのfileUriがlocalStorageに
-        //   残っていれば、サーバーへの問い合わせなしで即座に
-        //   「文字起こしから再開できる」ことが分かる。この経路は
-        //   checkSessionStatus（Drive側の状態を問い合わせる、やや重い
-        //   処理）より優先し、より高速な案内を提供する。
-        // ==========================================
         if (window.appController.hasPendingGeminiFileUris()) {
             const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
             const templateType = UI.templateSelect.value;
@@ -658,19 +704,11 @@
         }
     }
 
-    // 🌟 変更点（案A・連番フォルダ保存方式）：
-    //   従来は「音声結合が未完了(audio_pending)」という状態を持って
-    //   いたが、案Aでは音声を結合しないため、この状態区分自体が
-    //   なくなった。録音中の音声は常に最初から最終的な保存場所
-    //   （専用フォルダ）に置かれているため、判定は
-    //   「音声は保存済み(audio_saved)」か「データが見当たらない
-    //   (not_found)」かのシンプルな2択になった。
     function renderRecoveryStatus(statusResult) {
         const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
         const templateType = UI.templateSelect.value;
 
         if (statusResult.status === "audio_saved") {
-            // 🌟 音声は専用フォルダに保存済み。文字起こし・議事録の生成から再開する。
             UI.recoveryStatusText.innerHTML =
                 `✅ <b>音声データは専用フォルダに保存済みです。</b>` +
                 `（フォルダ名: ${statusResult.audioFileName}、ファイル数: ${statusResult.fileCount}件）<br>` +
@@ -683,18 +721,12 @@
             );
 
         } else {
-            // 🌟 サーバー側にもデータが見当たらない
             UI.recoveryStatusText.innerHTML =
                 "⚠️ サーバー側にも、このセッションに対応する録音データが見つかりませんでした。<br>" +
                 "お手数ですが、Googleドライブの「レコーダー/音声データ」フォルダを直接ご確認ください。";
         }
     }
 
-    // ⚠️ 非推奨（案A・連番フォルダ保存方式への移行に伴う変更）：
-    //   この関数は「音声結合が未完了(audio_pending)」という状態からの
-    //   再開を担っていたが、案Aでは音声を結合しないため、この状態区分
-    //   自体がなくなった（renderRecoveryStatusから呼び出されなくなった）。
-    //   後方互換のため関数自体は残している。
     async function runRecoveryAudioPending(meetingName, templateType) {
         UI.recoveryActionBtn.disabled = true;
         UI.recoveryStatusText.innerHTML = "🔊 音声データを1本にまとめています...";
@@ -702,10 +734,6 @@
         try {
             const audioResult = await window.appController.resumeFromAudioPending(meetingName);
 
-            // 🌟 2時間超対応：音声結合の再開後、localStorageにfileUriが
-            //   残っていれば新方式（transcribeFromGeminiFileUris）で
-            //   続行する。残っていなければ、Drive上の確定済みファイルから
-            //   作り直す緊急経路（transcribeFinalizedAudio）にフォールバックする。
             if (window.appController.hasPendingGeminiFileUris()) {
                 UI.recoveryStatusText.innerHTML =
                     `✅ 音声データの確認が完了しました！<br>` +
@@ -748,12 +776,6 @@
         }
     }
 
-    // ==========================================
-    // 🌟 新設（2時間超対応・逐次アップロード方式）：
-    //   localStorageに残っているfileUri配列だけを使い、重い音声の
-    //   再アップロードなしで即座に文字起こし・議事録生成から再開する。
-    //   お助けモードの中で最も高速に完了する経路。
-    // ==========================================
     async function runRecoveryFromGeminiFileUris(meetingName, templateType) {
         UI.recoveryActionBtn.disabled = true;
         UI.recoveryStatusText.innerHTML = "✨ アップロード済みの音声データから文字起こし中です...（数分かかることがあります）";
@@ -783,10 +805,6 @@
         UI.recoveryStatusText.innerHTML = "✨ 専用フォルダ内の音声データからAIが文字起こし中です...";
 
         try {
-            // 🌟 修正：AppState.mimeTypeはページ再読み込み後は初期値
-            //   （'audio/webm'）に戻ってしまっている可能性があるため、
-            //   録音時にstateへ記録済みの正しい値（appController.state.mimeType）
-            //   を優先して使う。
             const mimeType = window.appController.state.mimeType || AppState.mimeType;
             const result = await window.appController.resumeFromTranscriptPending(
                 audioFolderId, mimeType, meetingName, templateType
@@ -818,34 +836,6 @@
 
     // ==========================================
     // 🔆 画面スリープ防止（Wake Lock API）
-    //
-    // 🛠 背景：
-    //   スマホ等で長時間会議を録音する場合、画面が自動消灯（スリープ）すると、
-    //   ブラウザがバックグラウンド扱いになり MediaRecorder の動作が
-    //   スロットリングされたり停止したりするリスクがある。
-    //   Wake Lock API を使うことで、録音中は画面がスリープに入らないよう
-    //   明示的にロックする。
-    //
-    // 🛠 変更点（音声優先確定対応）：
-    //   従来はrequestWakeLock()を録音開始時、releaseWakeLock()を
-    //   「録音停止直後・文字起こし開始前」に呼んでいたが、これだと
-    //   「AIによる変換中」の間はWake Lockの保護対象外になっており、
-    //   このフェーズでスリープすると通信が中断される問題があった。
-    //   対策として、releaseWakeLock()の呼び出しタイミングを
-    //   「音声の確定保存が完了した後」まで遅らせるようにした
-    //   （stopRecordingAndProcess関数を参照）。
-    //
-    // 🔋 バッテリー消耗への配慮：
-    //   Wake Lockは「画面を明るく光らせ続ける」ものではなく、あくまで
-    //   「スリープ（自動消灯）させない」ためのものなので、OS側の
-    //   自動輝度調整機能（暗所での減光等）は引き続き有効に働く。
-    //   それでも「常時点灯」自体はバッテリーを消費するため、本アプリでは
-    //   録音中の画面をあえて暗いダークトーンの配色に切り替え、
-    //   表示による消費電力を抑える工夫を加えている（.recording-dark-mode参照）。
-    //
-    // ⚠️ 対応していない環境（一部のブラウザ・OS）や、Wake Lockが取得できな
-    //   かった場合は、ユーザーに対して「スリープさせないでください」という
-    //   注意喚起を表示することで補う。
     // ==========================================
     async function requestWakeLock() {
         if (!AppState.wakeLockSupported) {
@@ -859,12 +849,8 @@
             console.log("🔆 Wake Lock取得成功：画面スリープを防止します。");
             hideWakeLockWarning();
 
-            // 🌟 Wake Lockは、タブが非表示になったりOSに強制解除されたりすると
-            //   自動的に失われることがある。解除されたことを検知できるようにする。
             AppState.wakeLock.addEventListener('release', () => {
                 console.warn("⚠️ Wake Lockが解除されました（システムにより自動解除された可能性があります）。");
-                // 録音継続中、または録音停止後の確定処理中であれば、
-                // 再表示可能になったタイミングで再取得を試みる
                 if (AppState.isRecording || AppState.isStopping) {
                     showWakeLockWarning();
                 }
@@ -884,11 +870,6 @@
         hideWakeLockWarning();
     }
 
-    // 🌟 タブが再びアクティブになった際、Wake Lockが失われていたら再取得を試みる
-    //   （画面ロック解除・タブ切り替え復帰時などに有効）
-    //   🛠 変更点：録音中だけでなく、録音停止後の確定処理中（isStopping）も対象に含めた。
-    //     「AIによる変換中」表示のタイミングでスリープ→復帰した場合にも
-    //     Wake Lockを再取得できるようにするため。
     document.addEventListener('visibilitychange', async () => {
         if (document.visibilityState === 'visible' && (AppState.isRecording || AppState.isStopping) && !AppState.wakeLock) {
             console.log("🔆 画面が再アクティブ化されました。Wake Lockの再取得を試みます。");
@@ -906,20 +887,6 @@
 
     // ==========================================
     // 🌑 疑似スリープ表示の制御
-    //
-    // 🛠 目的：
-    //   Wake Lockで実際のOSスリープはキャンセルし続けている（＝画面は
-    //   点灯したまま）ため、何もしないと録音中は常に明るい画面が
-    //   表示され続け、バッテリーを消費する。
-    //   そこで、一定時間（PSEUDO_SLEEP_DELAY_MS）操作がなければ、
-    //   画面をほぼ黒いオーバーレイで覆い、見た目上は消灯したように
-    //   見せる。実際のスリープには入っていないため、MediaRecorderの
-    //   動作には影響しない。
-    //
-    // 🔆 解除：
-    //   画面のどこかをタップ・クリックすれば即座に解除され、
-    //   同時にタイマーがリセットされて、また無操作状態が続けば
-    //   再度フェードアウトしていく。
     // ==========================================
     function resetPseudoSleepTimer() {
         if (AppState.pseudoSleepTimerId) {
@@ -927,12 +894,10 @@
             AppState.pseudoSleepTimerId = null;
         }
 
-        // 疑似スリープ中であれば即座に解除する
         if (AppState.isPseudoSleeping) {
             wakePseudoSleep();
         }
 
-        // 録音中でなければタイマー自体をセットしない
         if (!AppState.isRecording) return;
 
         AppState.pseudoSleepTimerId = setTimeout(() => {
@@ -970,7 +935,6 @@
         UI.sleepOverlayElapsed.textContent = `${h}:${m}:${s}`;
     }
 
-    // 🌟 画面のどこをタップ/クリックしても疑似スリープを解除し、タイマーをリセットする
     ['click', 'touchstart', 'keydown'].forEach(eventName => {
         document.addEventListener(eventName, () => {
             if (AppState.isRecording) {
@@ -1003,7 +967,6 @@
         try {
             AppState.globalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-            // 🌟 新しい録音セッションを開始（sessionIdを新規発行）
             if (window.appController) window.appController.startNewSession();
 
             AppState.isRecording = true;
@@ -1021,18 +984,14 @@
             UI.statusText.style.color = "#fa5252";
             UI.progressContainer.style.display = "none";
 
-            // 🌟 録音中は省電力ダークトーンに切り替え（Wake Lockでの常時点灯に対する消費電力対策）
             document.body.classList.add('recording-active');
 
-            // 🌟 画面スリープ防止を試みる（失敗した場合は警告表示で補う）
             await requestWakeLock();
 
-            // 🌟 疑似スリープタイマーを起動（操作がないまま一定時間経つと画面を暗くする）
             resetPseudoSleepTimer();
 
             startElapsedTimeDisplay();
 
-            // 端末の対応フォーマット自動判定
             let mimeType = 'audio/webm';
             if (MediaRecorder.isTypeSupported('audio/webm')) {
                 mimeType = 'audio/webm';
@@ -1041,9 +1000,6 @@
             }
             AppState.mimeType = mimeType;
 
-            // 🌟 2時間超対応：最初のセグメントを開始する。
-            //   以降のセグメント切り替えは startNewSegment 内で自律的に
-            //   繰り返される（onstopハンドラから次のセグメントを起動する）。
             startNewSegment();
 
         } catch (err) {
@@ -1052,31 +1008,6 @@
         }
     }
 
-    // ==========================================
-    // 🌟 新設（2時間超対応・逐次アップロード方式）：セグメント単位の録音制御
-    //
-    // 🛠 目的：
-    //   SEGMENT_INTERVAL_MS（10分）ごとに、MediaRecorderを「完全停止→
-    //   新しいインスタンスで即座に再開」する。これにより、
-    //   すべてのセグメントが「正しいヘッダーを持つ、完全で独立した
-    //   1本のWebMファイル」として生成される（timeslice方式のヘッダー
-    //   問題を構造的に回避する）。
-    //
-    // 🛡️ 自律的な繰り返し：
-    //   各セグメントのonstopハンドラの中で、録音継続中
-    //   （AppState.isSegmentCycleActiveがtrueの間）であれば、
-    //   次のセグメントを即座に自動開始する。ユーザーが「録音終了」を
-    //   押すと、このフラグがfalseになり、連鎖が自然に止まる。
-    //
-    // ⏱️ タイマーの実装方針：
-    //   setIntervalではなく、各セグメント開始時にsetTimeoutを1回だけ
-    //   予約する方式にしている。stop()の実行〜次のstart()までには
-    //   若干の非同期処理（Blob確定、次インスタンス生成）が挟まるため、
-    //   setIntervalで固定間隔にすると徐々にタイマーがズレる
-    //   （ドリフトする）可能性がある。setTimeoutの再帰呼び出しなら、
-    //   常に「直前のセグメント開始からSEGMENT_INTERVAL_MS後」という
-    //   相対時間で正確に予約できる。
-    // ==========================================
     function startNewSegment() {
         if (!AppState.isSegmentCycleActive) {
             console.log("🛑 セグメントサイクルが終了しているため、新しいセグメントは開始しません。");
@@ -1086,15 +1017,9 @@
         const mimeType = AppState.mimeType;
         const options = mimeType ? { mimeType: mimeType } : {};
 
-        // 🌟 使い捨てのMediaRecorderインスタンス。timesliceは指定しない
-        //   （指定しない＝stop()が呼ばれた時に、録音開始からの全データが
-        //   1個の完全なBlobとしてondataavailableで一度だけ渡される）。
         const recorder = new MediaRecorder(AppState.globalStream, options);
         AppState.recorder = recorder;
 
-        // 🌟 このセグメントで蓄積されたBlobパーツ（通常は1個だが、
-        //   ブラウザ実装によっては複数回に分かれて発火する可能性があるため
-        //   念のため配列で受ける）
         let segmentBlobParts = [];
 
         recorder.ondataavailable = (e) => {
@@ -1115,22 +1040,17 @@
                 console.warn(`⚠️ セグメント${segmentIndex}: データが空のため、送信をスキップします。`);
             }
 
-            // 🌟 stop()完了を待っている処理（録音終了時のwaitForRecorderToStop）
-            //   があれば、ここで解決する。
             if (typeof AppState._onRecorderStopped === 'function') {
                 const callback = AppState._onRecorderStopped;
                 AppState._onRecorderStopped = null;
                 callback();
             }
 
-            // 🌟 録音継続中であれば、間髪入れずに次のセグメントを開始する。
-            //   これにより「完全停止→即再開」の切り替えが実現する。
             if (AppState.isSegmentCycleActive) {
                 startNewSegment();
             }
         };
 
-        // 🌟 追加：セグメント単位の録音異常終了の検知（画面スリープ・OSによる強制中断等）
         recorder.onerror = (event) => {
             console.error("❌ MediaRecorderでエラーが発生しました:", event.error);
             UI.statusText.innerHTML = "⚠️ 録音が中断されました（スリープ等の可能性）。もう一度録音を開始してください。";
@@ -1156,10 +1076,6 @@
 
         recorder.start();
 
-        // 🌟 SEGMENT_INTERVAL_MS後に、このセグメントを自動的に停止するよう予約する。
-        //   ユーザーが手動で「録音終了」を押した場合は、
-        //   stopRecordingAndProcess側でこのタイマーをクリアしたうえで
-        //   直接stop()を呼ぶため、二重停止にはならない。
         AppState.segmentTimerId = setTimeout(() => {
             if (AppState.recorder && AppState.recorder.state === "recording") {
                 AppState.recorder.stop();
@@ -1167,28 +1083,17 @@
         }, APP_CONFIG.SEGMENT_INTERVAL_MS);
     }
 
-    // ==========================================
-    // 🌟 新設（2時間超対応・逐次アップロード方式）：
-    //   1セグメント（10分・完全なWebMファイル）が確定した際の処理。
-    //   Drive保存（appendAudioChunk）とGeminiアップロード
-    //   （uploadChunkToGeminiAndStore）を並行して非同期に行う。
-    // ==========================================
     function handleSegmentComplete(segmentBlob, mimeType, segmentIndex) {
         const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
 
-        // UIドットを追加（保存・アップロード進捗表示用）
         const dot = document.createElement('div');
         dot.className = 'dot';
         dot.id = `dot-${segmentIndex}`;
         UI.dotsGrid.appendChild(dot);
 
-        // 🌟 送信順序を保証するため、キューに繋げて順番に処理する
         AppState.audioSendQueue = AppState.audioSendQueue.then(async () => {
             const base64 = await blobToBase64(segmentBlob);
 
-            // 🌟 Drive保存とGeminiアップロードは、目的が異なる独立した処理のため、
-            //   互いの成否に関わらず両方とも実行する（Promise.allSettled）。
-            //   片方が失敗しても、もう片方の処理まで止めないようにするため。
             const results = await Promise.allSettled([
                 window.appController
                     ? window.appController.appendAudioChunk(base64, mimeType, meetingName, segmentIndex)
@@ -1203,9 +1108,6 @@
 
             const dotEl = document.getElementById(`dot-${segmentIndex}`);
             if (dotEl) {
-                // 🌟 文字起こしへの影響が大きいGemini側の成否を優先して表示する。
-                //   Drive側だけ失敗した場合は「complete」のまま
-                //   （原本バックアップの欠損はaudioWarningで別途警告されるため）。
                 if (geminiOk) {
                     dotEl.classList.add('complete');
                 } else {
@@ -1228,40 +1130,12 @@
         });
     }
 
-
-
-    // ==========================================
-    // 🌟 変更点（2時間超対応・逐次アップロード方式）：
-    //   録音停止後の処理を、
-    //     ① セグメントサイクルの停止（最後のセグメントを確定）
-    //     ② Drive音声結合（finalizeAudio）と
-    //        Gemini文字起こし（transcribeFromGeminiFileUris）を並行実行
-    //     ③ 議事録生成
-    //   という流れに変更した。
-    //
-    //   ねらい：
-    //   従来（音声優先確定対応）は「音声結合→文字起こし」を直列で行って
-    //   いたが、2時間超対応版では文字起こしに必要なfileUriは録音中に
-    //   既にGeminiへアップロード済みのため、Drive側の音声結合を待つ
-    //   理由がなくなった。両者は完全に独立した処理のため、並行実行
-    //   することでユーザーの待ち時間を短縮する。
-    //   なお「音声（Drive原本）は必ず確保される」という当初の最優先方針は、
-    //   Drive保存が録音中の逐次appendAudioChunkの時点で既にほぼ完了して
-    //   いるため、この並行実行によって損なわれることはない。
-    //
-    //   Wake Lockの解放（releaseWakeLock）は、従来通り「両方の処理が
-    //   終わった後」まで維持する。これにより、「AIによる変換中」表示中に
-    //   スマホがスリープしてしまうリスクを引き続き抑える。
-    // ==========================================
     async function stopRecordingAndProcess() {
         if (AppState.isStopping) return;
         AppState.isStopping = true;
         AppState.isRecording = false;
-        // 🌟 これ以降、セグメントのonstopハンドラは「次のセグメントを
-        //   自動開始しない」（連鎖を止める）。
         AppState.isSegmentCycleActive = false;
 
-        // 🌟 予約されている次回の自動セグメント切り替えタイマーをクリアする
         if (AppState.segmentTimerId) {
             clearTimeout(AppState.segmentTimerId);
             AppState.segmentTimerId = null;
@@ -1270,10 +1144,6 @@
         stopElapsedTimeDisplay();
         stopPseudoSleepCycle();
 
-        // 🌟 Wake Lockはこの時点ではまだ解放しない。
-        //   「音声確定・文字起こし」の両方が終わるまではスリープを防ぎ続けたい
-        //   ため、解放タイミングは処理の後ろ（finally節）へ置いている。
-        //   （ダークトーン表示は録音中の見た目のためのものなので、ここで解除してよい）
         document.body.classList.remove('recording-active');
 
         UI.mainRecordBtn.disabled = true;
@@ -1284,17 +1154,13 @@
         UI.statusText.style.color = "#4dabf7";
 
         try {
-            // 🌟 現在進行中のセグメントを停止させ、最後のセグメントを確定させる
             await waitForRecorderToStop();
 
-            // マイクの物理接続を完全にオフ
             if (AppState.globalStream) {
                 AppState.globalStream.getTracks().forEach(track => track.stop());
                 AppState.globalStream = null;
             }
 
-            // 🌟 重要：最後のセグメントぶんの送信キュー（Drive保存＋Geminiアップロード）
-            //   が完了するのを待つ
             UI.statusText.innerHTML = "✨ 最後の音声データを保存・アップロード中...";
             await AppState.audioSendQueue;
 
@@ -1303,15 +1169,6 @@
             const meetingName = UI.meetingNameInput.value.trim() || "無題の会議";
             const templateType = UI.templateSelect.value;
 
-            // ==========================================
-            // 🌟 2時間超対応・案A対応：音声データの保存確認とGemini文字起こしを
-            //   並行実行する。両者は完全に独立した処理（前者はDrive上の
-            //   専用フォルダの状態確認、後者はGemini側に既にアップロード
-            //   済みのfileUriを対象）のため、互いの成否・完了タイミングに
-            //   依存しない。
-            //   案Aでは音声の各セグメントはappendAudioChunkの時点で既に
-            //   Driveへ保存済みのため、ここでの「確認」処理はごく軽量。
-            // ==========================================
             UI.statusText.innerHTML = "🔊 音声データの保存確認とAI文字起こしを並行して進めています...（数分かかることがあります）";
             UI.progressContainer.style.display = "block";
             UI.progressTitle.innerHTML = "音声データの確認・AI文字起こし処理中...";
@@ -1334,12 +1191,6 @@
                 );
             }
 
-            // 🌟 両方失敗した場合のみ、ここで処理を止めて明確にエラーを伝える。
-            //   ただし案Aでは、音声の各セグメントはappendAudioChunkの時点で
-            //   既にDrive上の専用フォルダへ直接保存されているため、
-            //   「音声確定（finalizeAudioAndGetResult）」の失敗は、単に
-            //   フォルダの存在確認通信が失敗しただけであり、音声データ
-            //   自体が失われたことを意味しない。
             if (!audioOk && !transcriptOk) {
                 UI.progressTitle.innerHTML = "⚠️ 音声確認・文字起こしの両方に失敗しました";
                 UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
@@ -1356,10 +1207,6 @@
             }
 
             if (!audioOk) {
-                // 🌟 音声確認だけ失敗。文字起こし・議事録は既に完成しているため、
-                //   その旨を伝える。案Aでは音声原本自体は録音中に既に
-                //   保存済みのため、ここでの失敗は「フォルダの状態確認通信」の
-                //   失敗であり、音声データの消失を意味しない。
                 alert(
                     "⚠️ 音声データの状態確認に失敗しましたが、文字起こし・議事録の生成は完了しました。\n" +
                     "音声原本は録音中にドライブへ既に保存されているはずです。確認が必要な場合は" +
@@ -1369,8 +1216,6 @@
             }
 
             if (!transcriptOk) {
-                // 🌟 文字起こしだけ失敗。音声は確定済みのため、後から
-                //   「手動再開」で文字起こし・議事録を作り直せる。
                 UI.progressTitle.innerHTML = "🔊 音声データの保存は完了しています";
                 UI.statusText.innerHTML = "タップして新しい録音を開始";
                 UI.statusText.style.color = "#868e96";
@@ -1383,7 +1228,6 @@
                 return;
             }
 
-            // 🌟 ここに到達するのは、音声確認・文字起こしの両方が成功したケース
             const result = transcriptSettled.value;
 
             UI.progressTitle.innerHTML = "🎉 処理が完了しました！";
@@ -1417,13 +1261,10 @@
             }
 
         } catch (err) {
-            // 🌟 このcatchに到達するのは、上記のPromise.allSettledの枠外で
-            //   想定外の例外が起きたケース。
             alert("エラーが発生しました: " + err.message + "\n（音声データは既に確定保存されている可能性があります）");
             UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
             UI.statusText.style.color = "#fa5252";
         } finally {
-            // 🌟 念のための保険：異常終了時もWake Lock・ダークトーン・疑似スリープを確実に解除する
             stopPseudoSleepCycle();
             releaseWakeLock();
             document.body.classList.remove('recording-active');
@@ -1434,17 +1275,6 @@
         }
     }
 
-    // 🌟 MediaRecorder.stop() を確実に待つヘルパー
-    //
-    // 🛠 2時間超対応版での注意点：
-    //   この関数は「現在進行中のセグメント（AppState.recorderが指す
-    //   インスタンス）」を停止させ、そのonstopハンドラ（startNewSegment
-    //   内で定義）の完了を待つ。
-    //   呼び出し前提として、AppState.isSegmentCycleActiveが既にfalseに
-    //   設定されていること（stopRecordingAndProcessで設定済み）。
-    //   これにより、onstopハンドラ内で「次のセグメントを自動開始する」
-    //   連鎖が発生しないことが保証された状態で、最後のセグメントの
-    //   確定だけを待てる。
     function waitForRecorderToStop() {
         return new Promise((resolve) => {
             if (!AppState.recorder || AppState.recorder.state !== "recording") {
@@ -1461,9 +1291,8 @@
             };
 
             AppState._onRecorderStopped = finalize;
-            AppState.recorder.stop(); // 🌟 これによりondataavailableが発火してからonstopが呼ばれる
+            AppState.recorder.stop();
 
-            // 保険：万一onstopが発火しない異常系でも最大5秒でタイムアウト
             setTimeout(finalize, 5000);
         });
     }
@@ -1490,7 +1319,6 @@
         const s = String(sec % 60).padStart(2, '0');
         UI.elapsedTime.textContent = `経過時間 ${h}:${m}:${s}`;
 
-        // 🌟 疑似スリープ表示中も経過時間だけは薄く更新し続ける
         if (AppState.isPseudoSleeping) {
             updateSleepOverlayElapsedText();
         }
@@ -1504,9 +1332,6 @@
         });
     }
 
-    // ⚠️ 非推奨（バグ修正・方式変更）：
-    //   チャンク単位の個別文字起こし（processAllChunks）用の進捗表示関数。
-    //   通常フローからは呼ばれなくなったが、後方互換のため残している。
     function updateProgressUI(chunks) {
         chunks.forEach(chunk => {
             const dot = document.getElementById(`dot-${chunk.id}`);
