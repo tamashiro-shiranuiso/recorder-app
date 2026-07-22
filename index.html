@@ -335,19 +335,23 @@
            🌟 新設（診断ログ強化対応）：
            文字起こし・議事録生成の処理結果（finishReason・トークン数等）を
            表示し、そのままAIへの不具合報告としてコピペできるようにするパネル。
+           他の recovery-panel（お助けモード・設定）と見た目のトーンを
+           揃えつつ、テキストエリアの高さは詰めすぎず・伸ばしすぎずの
+           バランスにしている（アプリ全体の縦スクロール量が
+           増えすぎないよう配慮）。
            ========================================== */
         .recovery-panel.diagnostics {
             display: none;
         }
         .recovery-panel.diagnostics h4 {
-            color: #495057;
+            color: #868e96;
         }
         .diagnostics-textarea {
             width: 100%;
             box-sizing: border-box;
-            height: 220px;
+            height: 160px;
             font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-            font-size: 12px;
+            font-size: 11px;
             line-height: 1.5;
             padding: 12px;
             border: 2px solid #f1f3f5;
@@ -362,6 +366,15 @@
             border-color: #3a3d44;
             color: #d0d3d8;
         }
+        .recovery-panel.diagnostics .recovery-btn:hover {
+            border-color: #868e96; color: #495057; background: #f1f3f5;
+        }
+        /* 🌟 診断アイコンボタンが押されている（パネル表示中）ことが
+           視覚的に分かるよう、他のアイコンボタンと差別化する状態色。 */
+        .btn-icon.active-panel {
+            background: #e7f5ff;
+            color: #4dabf7;
+        }
     </style>
 </head>
 <body>
@@ -370,12 +383,10 @@
     <div class="header">
         <h2>🎙 レコーダー</h2>
         <div class="header-actions">
-            <button class="btn-pill" title="診断情報を確認する" id="showDiagnosticsBtn">
-                <span>🩺</span> 診断
-            </button>
             <button class="btn-pill" title="手動で途中から再開する" id="showRecoveryBtn">
                 <span>🛠</span> 手動再開
             </button>
+            <button class="btn-icon" title="診断情報を確認する" id="showDiagnosticsBtn">🩺</button>
             <button class="btn-icon" title="設定" id="settingsBtn">⚙️</button>
         </div>
     </div>
@@ -576,28 +587,49 @@
             }
         });
 
-        // パネル制御
+        // ==========================================
+        // 🌟 パネル制御（お助けモード・設定・診断情報の3枚は排他表示）
+        //
+        // 🛠 整理の経緯：
+        //   3つのパネルそれぞれで「他の2つを閉じる」処理を個別に
+        //   書いていたため、パネルが増えるたびに全箇所を修正する必要が
+        //   あり、UIの見た目も揃いにくかった。togglePanel() に集約し、
+        //   ヘッダーのボタン側にも「今開いているパネルはどれか」が
+        //   一目で分かるよう active-panel クラスを付け外しする。
+        // ==========================================
+        const ALL_PANELS = [
+            { panel: UI.recoveryPanel, btn: UI.showRecoveryBtn },
+            { panel: UI.settingsPanel, btn: UI.settingsBtn },
+            { panel: UI.diagnosticsPanel, btn: UI.showDiagnosticsBtn }
+        ];
+
+        function togglePanel(targetPanel, targetBtn, onOpen) {
+            const isCurrentlyOpen = targetPanel.style.display === 'block';
+
+            ALL_PANELS.forEach(({ panel, btn }) => {
+                panel.style.display = 'none';
+                if (btn) btn.classList.remove('active-panel');
+            });
+
+            if (!isCurrentlyOpen) {
+                targetPanel.style.display = 'block';
+                targetPanel.classList.add('fade-in');
+                if (targetBtn) targetBtn.classList.add('active-panel');
+                if (onOpen) onOpen();
+            }
+        }
+
         // 🌟 変更点（自動再開対応）：お助けモードを開いたタイミングで、
         //   保存済みsessionIdを使った自動状態確認（checkRecoveryStatus）を実行する。
         //   ユーザーはリンクやパスを入力する必要がない。
         UI.showRecoveryBtn.addEventListener('click', () => {
-            UI.recoveryPanel.style.display = UI.recoveryPanel.style.display === 'block' ? 'none' : 'block';
-            if(UI.recoveryPanel.style.display === 'block') {
-                UI.recoveryPanel.classList.add('fade-in');
-                UI.settingsPanel.style.display = 'none';
-                UI.diagnosticsPanel.style.display = 'none';
-                checkRecoveryStatus();
-            }
+            togglePanel(UI.recoveryPanel, UI.showRecoveryBtn, checkRecoveryStatus);
         });
 
         UI.settingsBtn.addEventListener('click', () => {
-            UI.settingsPanel.style.display = UI.settingsPanel.style.display === 'block' ? 'none' : 'block';
-            if(UI.settingsPanel.style.display === 'block') {
-                UI.settingsPanel.classList.add('fade-in');
-                UI.recoveryPanel.style.display = 'none';
-                UI.diagnosticsPanel.style.display = 'none';
+            togglePanel(UI.settingsPanel, UI.settingsBtn, () => {
                 UI.gasUrlInput.value = window.appController ? window.appController.gasUrl : "";
-            }
+            });
         });
 
         UI.saveSettingsBtn.addEventListener('click', () => {
@@ -607,6 +639,7 @@
                 if(window.appController) window.appController.gasUrl = url;
                 alert("設定を保存しました！");
                 UI.settingsPanel.style.display = 'none';
+                UI.settingsBtn.classList.remove('active-panel');
             } else {
                 alert("URLを入力してください。");
             }
@@ -618,16 +651,12 @@
         //   ユーザーが手動でいつでも開けるよう、このボタンからも開閉できるようにする。
         if (UI.showDiagnosticsBtn) {
             UI.showDiagnosticsBtn.addEventListener('click', () => {
-                UI.diagnosticsPanel.style.display = UI.diagnosticsPanel.style.display === 'block' ? 'none' : 'block';
-                if (UI.diagnosticsPanel.style.display === 'block') {
-                    UI.diagnosticsPanel.classList.add('fade-in');
-                    UI.recoveryPanel.style.display = 'none';
-                    UI.settingsPanel.style.display = 'none';
+                togglePanel(UI.diagnosticsPanel, UI.showDiagnosticsBtn, () => {
                     // 🌟 既に保持されている診断情報があれば表示する
                     if (window.lastDiagnosticsText) {
                         UI.diagnosticsText.value = window.lastDiagnosticsText;
                     }
-                }
+                });
             });
         }
 
