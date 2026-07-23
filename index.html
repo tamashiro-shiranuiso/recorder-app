@@ -766,12 +766,28 @@
             });
         });
 
+        // 🔍【デバッグ対応・一時変更】：
+        //   「設定を保存」ボタンを押した際に、実際に何が入力欄に入っており、
+        //   localStorageに何が保存され、appController.gasUrlに何が
+        //   反映されているかを、その場でアラート表示して確認できるようにした。
+        //   原因判明後はこのデバッグ用アラートは元に戻す想定。
         UI.saveSettingsBtn.addEventListener('click', () => {
             const url = UI.gasUrlInput.value.trim();
             if(url) {
                 localStorage.setItem('saved_gas_url', url);
                 if(window.appController) window.appController.gasUrl = url;
-                alert("設定を保存しました！");
+
+                // 🔍 デバッグ用：実際に何が保存され、何が読み取れているかを可視化
+                const savedInLocalStorage = localStorage.getItem('saved_gas_url');
+                const onController = window.appController ? window.appController.gasUrl : "(appController無し)";
+                alert(
+                    "【デバッグ情報】\n" +
+                    "入力欄の値: " + url + "\n" +
+                    "localStorageに保存された値: " + savedInLocalStorage + "\n" +
+                    "appController.gasUrlの値: " + onController + "\n" +
+                    "window.appControllerは存在するか: " + (!!window.appController)
+                );
+
                 UI.settingsPanel.style.display = 'none';
                 UI.settingsBtn.classList.remove('active-panel');
             } else {
