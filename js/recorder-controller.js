@@ -16,6 +16,21 @@
  *   （Cloud Logging）で行う想定だが、たま氏自身が手元でテストする際は、
  *   ブラウザの開発者ツールを開かずとも、画面上のパネルからそのまま
  *   コピペしてAIに貼れるようにする。
+ *
+ * 🛠 診断ログ蓄積対応（今回の追加変更点）：
+ * ・従来、DiagnosticsReporter.report() は呼ばれるたびにパネルの
+ *   テキストエリアを「上書き」していたため、1回のセッションで
+ *   複数回レポートが出る場合（例：文字起こし完了時→最終確定時）、
+ *   最後に呼ばれたレポートしかパネルに残らなかった。
+ *   スマホ（Android等）では開発者ツールのコンソールを開くのが
+ *   容易ではないため、手前に出ているはずの文字起こし側の詳細
+ *   （finishReason等）が実質確認不能になっていた。
+ * ・DiagnosticsReporter に reports 配列を新設し、セッション中に
+ *   出た全レポートを蓄積したうえで、結合して表示するように変更した。
+ * ・あわせて、finalizeSession が最終確定レポートを出す際、
+ *   文字起こし側の診断情報を一律 null で渡していた箇所を、
+ *   呼び出し元（transcribeFromGeminiFileUris等）から実データを
+ *   引き継げるように修正した。
  */
 
 const CONFIG = {
@@ -25,18 +40,24 @@ const CONFIG = {
 };
 
 // ==========================================
-// 🌟 新設（診断ログ強化対応）：診断情報の整形・保持担当
+// 🌟 診断情報の整形・保持担当（診断ログ蓄積対応）
 //
 // 🛠 設計方針：
 //   GASから返ってくる diagnostics オブジェクト（Step1文字起こし、
 //   Step2校正、議事録生成それぞれの finishReason / usage 等）を
 //   受け取り、人間が読みやすいテキストに整形する。
+//   1回のセッション中に複数回出るレポートは reports 配列に蓄積し、
+//   パネルには常に「その時点までの全レポート」を時系列で表示する。
 //   window.lastDiagnosticsText にも保持しておくことで、
 //   ブラウザのコンソールから `copy(window.lastDiagnosticsText)` を
 //   実行するだけでもクリップボードにコピーできるようにする
 //   （UIパネルを使わない場合の保険）。
 // ==========================================
 const DiagnosticsReporter = {
+
+    // 🌟 このセッション（ページ読み込み〜リロードまで）で出た
+    //   レポート文字列を古い順に保持する。
+    reports: [],
 
     // 🌟 diagnostics（Step1/Step2）とtranscribeMultipleFileUrisの
     //   トップレベル情報、および任意でminutesDiagnosticsをまとめて
@@ -113,8 +134,8 @@ const DiagnosticsReporter = {
         return lines.join("\n");
     },
 
-    // 🌟 レポートを (a) コンソール出力 (b) window.lastDiagnosticsTextへの保持
-    //   (c) UIパネルへのテキスト反映、まとめて行う。
+    // 🌟 レポートを (a) コンソール出力 (b) reports配列への蓄積
+    //   (c) 蓄積済み全レポートのUIパネルへの反映、まとめて行う。
     //
     // 🛠 UI崩れ対策（レビュー後の調整）：
     //   当初は毎回の完了時にパネルを強制的に開いていたが、これだと
@@ -122,19 +143,38 @@ const DiagnosticsReporter = {
     //   「テキストの中身は常に最新化する」が「パネルを勝手に開くのは
     //   異常時（finishReasonがSTOP以外）のみ」に変更した。
     //   正常時はボタン（🩺診断）を押した時にだけ表示すれば十分。
+    //
+    // 🛠 診断ログ蓄積対応（今回の変更）：
+    //   スマホ等で開発者ツールのコンソールを開きにくい環境でも、
+    //   1回のセッション中に出た複数のレポート（文字起こし完了時、
+    //   最終確定時など）をすべてパネル上で遡って確認できるよう、
+    //   テキストエリアには「蓄積済み全レポートを結合したもの」を
+    //   常に反映するようにした。
     report: function(label, transcriptResult, minutesDiagnostics) {
         const reportText = this.formatReport(label, transcriptResult, minutesDiagnostics);
 
         // (a) コンソールへ出力（開発者ツールでそのまま選択・コピー可能）
         console.log(reportText);
 
-        // (b) グローバル変数へ保持（コンソールから copy(window.lastDiagnosticsText) 可能）
-        window.lastDiagnosticsText = reportText;
+        // 🌟 (b) 蓄積配列へ追加。セッション（ページの読み込み）中の全レポートを保持する。
+        this.reports.push(reportText);
 
-        // (c) UIパネルのテキストは常に最新化しておく（表示するかは別判断）
+        // 🌟 (c) 蓄積された全レポートを結合し、件数の案内を先頭に付けたものを
+        //   window.lastDiagnosticsText と UIパネルの両方に反映する。
+        //   古い順→新しい順に並べ、最新のものが一番下に来るようにする。
+        const combinedText =
+            `【${this.reports.length}件のレポートを表示中（古い順・最新は末尾）】\n\n` +
+            this.reports.join("\n\n");
+
+        // グローバル変数へ保持（コンソールから copy(window.lastDiagnosticsText) 可能）
+        window.lastDiagnosticsText = combinedText;
+
+        // UIパネルのテキストは常に最新化しておく（表示するかは別判断）
         const textarea = document.getElementById('diagnosticsText');
         if (textarea) {
-            textarea.value = reportText;
+            textarea.value = combinedText;
+            // 🌟 最新のレポートがすぐ見えるよう、スクロール位置を末尾に合わせる
+            textarea.scrollTop = textarea.scrollHeight;
         }
 
         // 🌟 異常（finishReasonがSTOP以外）を検知した場合のみ、
@@ -155,7 +195,21 @@ const DiagnosticsReporter = {
             }
         }
 
-        return reportText;
+        return combinedText;
+    },
+
+    // 🌟 新規セッション開始時（録音開始時）など、明示的に呼ばれたときのみ
+    //   蓄積済みレポートをクリアするヘルパー。
+    //   あえて録音開始時などに自動で組み込まず、必要になったら
+    //   呼び出し側から明示的に呼ぶ設計とし、「前回の録音の診断ログを
+    //   見たかったのに消えていた」という事故を防ぐ。
+    clearReports: function() {
+        this.reports = [];
+        window.lastDiagnosticsText = "";
+        const textarea = document.getElementById('diagnosticsText');
+        if (textarea) {
+            textarea.value = "";
+        }
     }
 };
 
@@ -455,7 +509,10 @@ class RecorderController {
             const fullTranscript = response.text || "";
             console.log("🎉 文字起こしが完了しました！");
 
-            return await this.finalizeSession(meetingName, templateType, fullTranscript);
+            // 🌟【診断ログ蓄積対応・変更】：
+            //   文字起こし側の診断情報（response）をfinalizeSessionまで
+            //   引き継ぎ、最終確定レポートでもnull扱いにならないようにする。
+            return await this.finalizeSession(meetingName, templateType, fullTranscript, response);
 
         } finally {
             this.isProcessing = false;
@@ -556,7 +613,11 @@ class RecorderController {
             const fullTranscript = response.text || "";
             console.log("🎉 文字起こしが完了しました！");
 
-            return await this.finalizeSession(meetingName, templateType, fullTranscript);
+            // 🌟【診断ログ蓄積対応・変更】：
+            //   文字起こし側の診断情報（response、finishReasonを含む）を
+            //   finalizeSessionまで引き継ぐ。これにより「最終確定」レポート内の
+            //   文字起こし処理欄が常にnullになっていた問題を解消する。
+            return await this.finalizeSession(meetingName, templateType, fullTranscript, response);
 
         } finally {
             this.isProcessing = false;
@@ -592,6 +653,10 @@ class RecorderController {
                 console.log("🎉 すべての文字起こしが完了しました！");
                 const sortedChunks = [...this.state.chunks].sort((a, b) => a.id - b.id);
                 const fullTranscript = sortedChunks.map(c => c.text).join('\n\n');
+                // 🌟 このフロー（旧・チャンク並列送信方式）はチャンクごとのレスポンスに
+                //   finishReason等の診断情報オブジェクトを保持していないため、
+                //   従来通り診断情報なし（undefined）でfinalizeSessionを呼ぶ。
+                //   finalizeSession側でフォールバック処理される。
                 return await this.finalizeSession(meetingName, templateType, fullTranscript);
             } else {
                 throw new Error("一部の処理がエラーで停止しました。手動再開をお願いします。");
@@ -711,6 +776,8 @@ class RecorderController {
         const minutesResponse = await this.callGasApi(minutesPayload);
 
         // 🌟【診断ログ強化対応・追加】：議事録生成の診断情報も追記でレポートする
+        //   🛠【診断ログ蓄積対応・変更】：ここでもresponse（文字起こし側のfinishReason等）を
+        //   そのまま引き継いでレポートし、nullにならないようにする。
         if (minutesResponse.minutesDiagnostics) {
             DiagnosticsReporter.report(
                 "お助けモード：議事録生成",
@@ -728,7 +795,14 @@ class RecorderController {
         };
     }
 
-    async finalizeSession(meetingName, templateType, fullTranscript) {
+    // 🌟【診断ログ蓄積対応・変更】：
+    //   第4引数 transcriptDiagnosticsSource を新設。
+    //   呼び出し元（transcribeFromGeminiFileUris / transcribeFinalizedAudio等）から
+    //   文字起こし処理のレスポンス（finishReason等を含む）を受け取れるようにし、
+    //   最終確定レポート内の「文字起こし処理」欄が常にnullになっていた問題を解消する。
+    //   呼び出し元が渡してこない場合（processAllChunks等の旧経路）は、
+    //   従来通りnull扱いにフォールバックする。
+    async finalizeSession(meetingName, templateType, fullTranscript, transcriptDiagnosticsSource) {
         if (this.hasFinalized) {
             console.warn("⚠️ finalizeSession: 既に確定済みのため、この呼び出しは無視します。");
             return null;
@@ -763,10 +837,15 @@ class RecorderController {
             //   議事録生成側の診断情報も、直前の文字起こし診断情報と
             //   合わせて再レポートする（1回のセッションの最終報告として、
             //   まとめて確認できるようにするため）。
+            //
+            // 🛠【診断ログ蓄積対応・変更】：
+            //   従来 { finishReason: null, diagnostics: null } という
+            //   ダミーを渡していた箇所を、呼び出し元から引き継いだ
+            //   transcriptDiagnosticsSource に差し替える。
             if (response.minutesDiagnostics) {
                 DiagnosticsReporter.report(
                     "最終確定（文字起こし＋議事録生成）",
-                    { finishReason: null, diagnostics: null }, // 文字起こし分は既に別途report済みのため省略
+                    transcriptDiagnosticsSource || { finishReason: null, diagnostics: null },
                     response.minutesDiagnostics
                 );
             }
