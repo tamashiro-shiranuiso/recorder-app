@@ -690,11 +690,15 @@
 
         UI.settingsBtn.addEventListener('click', () => {
             togglePanel(UI.settingsPanel, UI.settingsBtn, () => {
-                UI.gasUrlInput.value = window.appController ? window.appController.gasUrl : "";
+                // 🌟JSが未読込でもUIが空にならないよう、ブラウザ保存領域から直接復旧させる
+                const savedUrl = localStorage.getItem('saved_gas_url') || "";
+                UI.gasUrlInput.value = savedUrl;
+                if (window.appController && window.appController.gasUrl) {
+                    UI.gasUrlInput.value = window.appController.gasUrl;
+                }
             });
         });
 
-        // ⚠️ 修正箇所: (e) => e.preventDefault() を追加し、ブラウザリロードを防止
         UI.saveSettingsBtn.addEventListener('click', (e) => {
             e.preventDefault(); 
             const url = UI.gasUrlInput.value.trim();
@@ -1030,10 +1034,22 @@
 
 
     async function handleRecordButtonClick() {
-        if (!window.appController || !window.appController.gasUrl) {
-            alert("初回設定が必要です！\n右上の「⚙️設定」ボタンから、GASウェブアプリのURLを登録してください。");
-            if(UI.settingsPanel.style.display !== 'block') UI.settingsBtn.click();
+        // 🌟JS読み込み失敗時の専用エラー表示を追加
+        if (!window.appController) {
+            alert("【エラー】システムが正常に読み込まれていません。\n\n「recorder-controller.js」が正しく読み込めていない可能性が高いです。\n・ファイル名（つづり）が間違っていないか\n・jsフォルダの中に入っているか\nをご確認ください。");
             return;
+        }
+
+        // 🌟URLの確認処理をより堅牢に修正
+        if (!window.appController.gasUrl) {
+            const savedUrl = localStorage.getItem('saved_gas_url');
+            if (savedUrl) {
+                window.appController.gasUrl = savedUrl;
+            } else {
+                alert("初回設定が必要です！\n右上の「⚙️設定」ボタンから、GASウェブアプリのURLを登録してください。");
+                if(UI.settingsPanel.style.display !== 'block') UI.settingsBtn.click();
+                return;
+            }
         }
 
         if (AppState.isStopping) {
