@@ -61,6 +61,11 @@
         
         .header-actions { position: relative; display: flex; align-items: center; }
 
+        /* 🌟【見た目調整対応・新設】：
+           ヘッダーの「⋮」ボタンから開くドロップダウンメニュー。
+           手動再開・診断情報・設定の3項目をここに集約する。
+           他のパネル（recovery-panel系）とは別の見た目にし、
+           「ヘッダー直下に浮くメニュー」であることが分かるようにした。 */
         .header-menu {
             display: none;
             position: absolute;
@@ -112,6 +117,8 @@
         body.recording-active .header-menu-item:hover {
             background-color: #2a2d33;
         }
+        /* 🌟 メニュー展開中は「⋮」ボタンも他のアイコンボタン同様
+           active-panel と同じ強調色にする。 */
         #headerMenuBtn.active-panel {
             background: #e7f5ff;
             color: #4dabf7;
@@ -247,6 +254,10 @@
 
         /* ==========================================
            🔋 録音中の省電力表示（ダークトーン）
+           Wake Lockで画面を点灯させ続ける分、表示自体の消費電力を
+           抑えるため、録音中は背景を暗いトーンに切り替える。
+           有機ELディスプレイでは黒に近い表示ほど消費電力が下がるため、
+           特にモバイル端末での長時間録音時に効果が期待できる。
            ========================================== */
         body.recording-active {
             background-color: #16181c;
@@ -289,6 +300,11 @@
 
         /* ==========================================
            🌑 疑似スリープオーバーレイ
+           実際のOSスリープはWake Lockでキャンセルし続けつつ、
+           一定時間操作がなければ画面をほぼ黒くフェードさせることで、
+           見た目上は消灯したように見せ、体感的な省電力感を出す。
+           有機ELディスプレイでは黒表示に近いほど実消費電力も下がる。
+           タップすると即座に解除される。
            ========================================== */
         .pseudo-sleep-overlay {
             position: fixed;
@@ -379,6 +395,13 @@
 
         /* ==========================================
            🎨 診断情報パネル（finishReason等の確認用）
+           🌟 新設（診断ログ強化対応）：
+           文字起こし・議事録生成の処理結果（finishReason・トークン数等）を
+           表示し、そのままAIへの不具合報告としてコピペできるようにするパネル。
+           他の recovery-panel（お助けモード・設定）と見た目のトーンを
+           揃えつつ、テキストエリアの高さは詰めすぎず・伸ばしすぎずの
+           バランスにしている（アプリ全体の縦スクロール量が
+           増えすぎないよう配慮）。
            ========================================== */
         .recovery-panel.diagnostics {
             display: none;
@@ -409,6 +432,8 @@
         .recovery-panel.diagnostics .recovery-btn:hover {
             border-color: #868e96; color: #495057; background: #f1f3f5;
         }
+        /* 🌟 診断アイコンボタンが押されている（パネル表示中）ことが
+           視覚的に分かるよう、他のアイコンボタンと差別化する状態色。 */
         .btn-icon.active-panel {
             background: #e7f5ff;
             color: #4dabf7;
@@ -420,17 +445,23 @@
 <div class="app-container">
     <div class="header">
         <h2>🎙 レコーダー</h2>
+        <!-- 🌟【見た目調整対応・変更点】：
+             従来はタイトルと「手動再開・診断情報・設定」の3ボタンが
+             同じ行に横並びになっており、スマホの画面幅ではタイトルが
+             1行に収まらず折り返されてしまっていた。
+             3ボタンを1つの「⋮（その他）」メニューに集約し、ヘッダーは
+             常に「タイトル＋メニューボタン1個」の2要素だけにすることで、
+             画面幅に関わらずタイトルが確実に1行に収まるようにした。 -->
         <div class="header-actions">
-            <!-- ⚠️ボタンリロード防止のため type="button" を付与 -->
-            <button type="button" class="btn-icon" title="メニュー" id="headerMenuBtn" aria-haspopup="true" aria-expanded="false">⋮</button>
+            <button class="btn-icon" title="メニュー" id="headerMenuBtn" aria-haspopup="true" aria-expanded="false">⋮</button>
             <div class="header-menu" id="headerMenu">
-                <button type="button" class="header-menu-item" id="showRecoveryBtn">
+                <button class="header-menu-item" id="showRecoveryBtn">
                     <span class="header-menu-icon">🛠</span> 手動再開
                 </button>
-                <button type="button" class="header-menu-item" id="showDiagnosticsBtn">
+                <button class="header-menu-item" id="showDiagnosticsBtn">
                     <span class="header-menu-icon">🩺</span> 診断情報
                 </button>
-                <button type="button" class="header-menu-item" id="settingsBtn">
+                <button class="header-menu-item" id="settingsBtn">
                     <span class="header-menu-icon">⚙️</span> 設定
                 </button>
             </div>
@@ -441,7 +472,7 @@
         <label>会議名・内容 (ファイル名)</label>
         <div class="input-with-icon">
             <input type="text" id="meetingNameInput" placeholder="例：〇〇様 担当者会議">
-            <button type="button" class="mini-mic-btn" id="meetingNameMicBtn" title="音声で入力">🎙️</button>
+            <button class="mini-mic-btn" id="meetingNameMicBtn" title="音声で入力">🎙️</button>
         </div>
     </div>
 
@@ -464,7 +495,7 @@
     </div>
 
     <div class="record-area">
-        <button type="button" class="record-btn" id="mainRecordBtn">🎤</button>
+        <button class="record-btn" id="mainRecordBtn">🎤</button>
         <div class="status-text" id="statusText">タップして録音を開始</div>
         <div class="elapsed-time" id="elapsedTime"></div>
         <div class="wake-lock-warning" id="wakeLockWarning">
@@ -482,14 +513,18 @@
         <div class="dots-grid" id="dotsGrid"></div>
     </div>
 
+    <!-- お助けモード（自動再開）パネル -->
+    <!-- 🌟 変更点：リンクの手入力は廃止。保存済みsessionIdを使い、
+         サーバー側の実データを根拠に自動で状態判定・再開する方式にした。 -->
     <div class="recovery-panel help" id="recoveryPanel">
         <h4>🛠 お助けモード（自動再開）</h4>
         <div id="recoveryStatusText" style="font-size: 13px; color: #868e96; line-height: 1.6; margin-bottom: 12px;">
             前回の録音状況を確認しています...
         </div>
-        <button type="button" class="recovery-btn" id="recoveryActionBtn" style="display:none;"></button>
+        <button class="recovery-btn" id="recoveryActionBtn" style="display:none;"></button>
     </div>
 
+    <!-- 🌟 新設（診断ログ強化対応）：診断情報パネル（finishReason・トークン数などの確認用） -->
     <div class="recovery-panel diagnostics" id="diagnosticsPanel">
         <h4>🩺 診断情報（AIへの共有用）</h4>
         <div style="font-size: 12px; color: #868e96; margin-bottom: 10px; line-height: 1.6;">
@@ -497,19 +532,21 @@
             「途中で止まった」等の不具合報告の際は、このテキストをそのままコピーして共有してください。
         </div>
         <textarea class="diagnostics-textarea" id="diagnosticsText" readonly placeholder="録音・文字起こし・議事録生成が完了すると、ここに診断情報が表示されます。"></textarea>
-        <button type="button" class="recovery-btn" id="copyDiagnosticsBtn">📋 診断情報をコピー</button>
+        <button class="recovery-btn" id="copyDiagnosticsBtn">📋 診断情報をコピー</button>
     </div>
 
+    <!-- システム設定パネル -->
     <div class="recovery-panel settings" id="settingsPanel">
         <h4>⚙️ システム設定</h4>
         <div class="input-group" style="margin-bottom: 0;">
             <label style="font-size: 12px;">GAS ウェブアプリURL</label>
             <input type="text" id="gasUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
-            <button type="button" class="recovery-btn" id="saveSettingsBtn">設定を保存して閉じる</button>
+            <button class="recovery-btn" id="saveSettingsBtn">設定を保存して閉じる</button>
         </div>
     </div>
 </div>
 
+<!-- 🌑 疑似スリープオーバーレイ：録音中、一定時間操作がないと表示される -->
 <div class="pseudo-sleep-overlay" id="pseudoSleepOverlay">
     <div class="sleep-indicator">
         <span class="sleep-rec-dot"></span>録音中<br>
@@ -518,6 +555,7 @@
     </div>
 </div>
 
+<!-- キャッシュ強制回避用のバージョン記述を追加(v=5.1 音声制約追加対応版) -->
 <script src="js/recorder-controller.js?v=5.1"></script>
 
 <script>
@@ -525,8 +563,8 @@
     // 🔧 設定と状態管理
     // ==========================================
     const APP_CONFIG = {
-        SEGMENT_INTERVAL_MS: 600000, 
-        PSEUDO_SLEEP_DELAY_MS: 15000 
+        SEGMENT_INTERVAL_MS: 600000, // 本番運用: 10分（テストする場合は短い値に変更してください）
+        PSEUDO_SLEEP_DELAY_MS: 15000 // 🌟 追加：録音中、操作がないままこの時間が経つと疑似スリープ表示になる
     };
 
     const AppState = {
@@ -545,10 +583,16 @@
         audioSendQueue: Promise.resolve(),
         segmentTimerId: null,
         isSegmentCycleActive: false,
+        // 🌟【文字起こし精度向上対応・Web Audio API前処理】：
+        //   マイク入力（rawMicStream）に対してハイパスフィルタ＋
+        //   ダイナミクス圧縮をかけた後の出力ストリームを
+        //   processedStream として MediaRecorder に渡す。
+        //   停止時に audioContext を確実に close() するため、
+        //   関連ノード・ストリームをすべて保持しておく。
         audioContext: null,
-        rawMicStream: null,      
-        processedStream: null,   
-        audioProcessingNodes: null 
+        rawMicStream: null,      // getUserMediaの生ストリーム（トラック停止用に保持）
+        processedStream: null,   // フィルタ後の出力ストリーム（MediaRecorderに渡す方）
+        audioProcessingNodes: null // { source, highpass, compressor, destination }
     };
 
     const UI = {
@@ -574,10 +618,12 @@
         settingsPanel: document.getElementById('settingsPanel'),
         gasUrlInput: document.getElementById('gasUrlInput'),
         saveSettingsBtn: document.getElementById('saveSettingsBtn'),
+        // 🌟 新設（診断ログ強化対応）
         showDiagnosticsBtn: document.getElementById('showDiagnosticsBtn'),
         diagnosticsPanel: document.getElementById('diagnosticsPanel'),
         diagnosticsText: document.getElementById('diagnosticsText'),
         copyDiagnosticsBtn: document.getElementById('copyDiagnosticsBtn'),
+        // 🌟 新設（見た目調整対応）：ヘッダーの「⋮」その他メニュー
         headerMenuBtn: document.getElementById('headerMenuBtn'),
         headerMenu: document.getElementById('headerMenu')
     };
@@ -586,6 +632,7 @@
     // 💡 イベントの紐付け
     // ==========================================
     function bindEvents() {
+        // 会議名の音声入力
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
             const recognition = new SpeechRecognition();
@@ -619,6 +666,7 @@
             UI.meetingNameMicBtn.style.display = 'none';
         }
 
+        // モード切替のUI制御
         UI.modeSelect.addEventListener('change', (e) => {
             if (window.appController) window.appController.state.mode = e.target.value;
             if (e.target.value === "3") {
@@ -629,6 +677,23 @@
             }
         });
 
+        // ==========================================
+        // 🌟 パネル制御（お助けモード・設定・診断情報の3枚は排他表示）
+        //
+        // 🛠 整理の経緯：
+        //   3つのパネルそれぞれで「他の2つを閉じる」処理を個別に
+        //   書いていたため、パネルが増えるたびに全箇所を修正する必要が
+        //   あり、UIの見た目も揃いにくかった。togglePanel() に集約し、
+        //   ヘッダーのボタン側にも「今開いているパネルはどれか」が
+        //   一目で分かるよう active-panel クラスを付け外しする。
+        //
+        // 🛠【見た目調整対応・変更点】：
+        //   3つのボタンをヘッダー直下の「⋮」その他メニュー内に
+        //   移設したことに伴い、togglePanel() 呼び出し前に必ず
+        //   ヘッダーメニュー自体を閉じるようにした
+        //   （メニュー項目をタップしたら、メニューは閉じてパネルだけが
+        //   開く、という一般的なドロップダウンメニューの挙動に揃える）。
+        // ==========================================
         const ALL_PANELS = [
             { panel: UI.recoveryPanel, btn: UI.showRecoveryBtn },
             { panel: UI.settingsPanel, btn: UI.settingsBtn },
@@ -659,6 +724,9 @@
             }
         }
 
+        // 🌟 新設（見た目調整対応）：ヘッダーの「⋮」その他メニューの開閉。
+        //   メニューを開くタイミングで、他の3パネルは念のため閉じておく
+        //   （メニューを開いた直後にパネルが被って表示される事故を防ぐ）。
         UI.headerMenuBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             const isOpen = UI.headerMenu.classList.contains('open');
@@ -678,29 +746,27 @@
             UI.headerMenuBtn.setAttribute('aria-expanded', 'true');
         });
 
+        // 🌟 メニュー外をタップ・クリックしたら自動的に閉じる。
         document.addEventListener('click', (e) => {
             if (UI.headerMenu.classList.contains('open') && !UI.headerMenu.contains(e.target)) {
                 closeHeaderMenu();
             }
         });
 
+        // 🌟 変更点（自動再開対応）：お助けモードを開いたタイミングで、
+        //   保存済みsessionIdを使った自動状態確認（checkRecoveryStatus）を実行する。
+        //   ユーザーはリンクやパスを入力する必要がない。
         UI.showRecoveryBtn.addEventListener('click', () => {
             togglePanel(UI.recoveryPanel, UI.showRecoveryBtn, checkRecoveryStatus);
         });
 
         UI.settingsBtn.addEventListener('click', () => {
             togglePanel(UI.settingsPanel, UI.settingsBtn, () => {
-                // 🌟JSが未読込でもUIが空にならないよう、ブラウザ保存領域から直接復旧させる
-                const savedUrl = localStorage.getItem('saved_gas_url') || "";
-                UI.gasUrlInput.value = savedUrl;
-                if (window.appController && window.appController.gasUrl) {
-                    UI.gasUrlInput.value = window.appController.gasUrl;
-                }
+                UI.gasUrlInput.value = window.appController ? window.appController.gasUrl : "";
             });
         });
 
-        UI.saveSettingsBtn.addEventListener('click', (e) => {
-            e.preventDefault(); 
+        UI.saveSettingsBtn.addEventListener('click', () => {
             const url = UI.gasUrlInput.value.trim();
             if(url) {
                 localStorage.setItem('saved_gas_url', url);
@@ -713,9 +779,14 @@
             }
         });
 
+        // 🌟 新設（診断ログ強化対応）：診断パネルの開閉
+        //   recorder-controller.js の DiagnosticsReporter.report() が
+        //   #diagnosticsPanel / #diagnosticsText を直接操作して自動表示するが、
+        //   ユーザーが手動でいつでも開けるよう、このボタンからも開閉できるようにする。
         if (UI.showDiagnosticsBtn) {
             UI.showDiagnosticsBtn.addEventListener('click', () => {
                 togglePanel(UI.diagnosticsPanel, UI.showDiagnosticsBtn, () => {
+                    // 🌟 既に保持されている診断情報があれば表示する
                     if (window.lastDiagnosticsText) {
                         UI.diagnosticsText.value = window.lastDiagnosticsText;
                     }
@@ -723,6 +794,7 @@
             });
         }
 
+        // 🌟 新設（診断ログ強化対応）：診断情報コピー・ボタン
         if (UI.copyDiagnosticsBtn) {
             UI.copyDiagnosticsBtn.addEventListener('click', async () => {
                 const text = window.lastDiagnosticsText || UI.diagnosticsText.value;
@@ -734,6 +806,7 @@
                     await navigator.clipboard.writeText(text);
                     UI.copyDiagnosticsBtn.textContent = "✅ コピーしました！";
                 } catch (err) {
+                    // クリップボードAPIが使えない環境向けのフォールバック
                     UI.diagnosticsText.select();
                     document.execCommand('copy');
                     UI.copyDiagnosticsBtn.textContent = "✅ コピーしました！";
@@ -748,7 +821,7 @@
     }
 
     // ==========================================
-    // 🛠 お助けモード：自動再開ロジック
+    // 🛠 お助けモード：自動再開ロジック（案A・連番フォルダ保存方式対応）
     // ==========================================
     async function checkRecoveryStatus() {
         UI.recoveryActionBtn.style.display = "none";
@@ -809,6 +882,7 @@
             UI.recoveryActionBtn.onclick = () => runRecoveryTranscriptPending(
                 statusResult.audioFolderId, meetingName, templateType
             );
+
         } else {
             UI.recoveryStatusText.innerHTML =
                 "⚠️ サーバー側にも、このセッションに対応する録音データが見つかりませんでした。<br>" +
@@ -1034,22 +1108,10 @@
 
 
     async function handleRecordButtonClick() {
-        // 🌟JS読み込み失敗時の専用エラー表示を追加
-        if (!window.appController) {
-            alert("【エラー】システムが正常に読み込まれていません。\n\n「recorder-controller.js」が正しく読み込めていない可能性が高いです。\n・ファイル名（つづり）が間違っていないか\n・jsフォルダの中に入っているか\nをご確認ください。");
+        if (!window.appController || !window.appController.gasUrl) {
+            alert("初回設定が必要です！\n右上の「⚙️設定」ボタンから、GASウェブアプリのURLを登録してください。");
+            if(UI.settingsPanel.style.display !== 'block') UI.settingsBtn.click();
             return;
-        }
-
-        // 🌟URLの確認処理をより堅牢に修正
-        if (!window.appController.gasUrl) {
-            const savedUrl = localStorage.getItem('saved_gas_url');
-            if (savedUrl) {
-                window.appController.gasUrl = savedUrl;
-            } else {
-                alert("初回設定が必要です！\n右上の「⚙️設定」ボタンから、GASウェブアプリのURLを登録してください。");
-                if(UI.settingsPanel.style.display !== 'block') UI.settingsBtn.click();
-                return;
-            }
         }
 
         if (AppState.isStopping) {
@@ -1064,6 +1126,36 @@
         }
     }
 
+    // ==========================================
+    // 🎚️ 音声前処理フィルタチェーン（Web Audio API）
+    //
+    // 🛠 目的：
+    //   getUserMedia の echoCancellation / noiseSuppression /
+    //   autoGainControl はブラウザ・端末依存のブラックボックス処理であり、
+    //   効果が不十分なケース（環境音が多い、複数人の音量差が大きい等）が
+    //   あるため、その手前でこちらでも制御できる軽量なフィルタを
+    //   追加でかけておく。
+    //
+    // 🛠 構成：
+    //   マイク入力 → ハイパスフィルタ（低周波ノイズ除去）
+    //             → ダイナミクスコンプレッサー（音量差の圧縮）
+    //             → MediaStreamDestination（MediaRecorderに渡す出力）
+    //
+    // 🛠 パラメータ選定の考え方：
+    //   ・ハイパスフィルタのカットオフは100Hz付近とした。人の声の
+    //     基本周波数（成人男性で概ね85〜180Hz、成人女性で165〜255Hz程度）
+    //     を削らない範囲で、空調音・振動音・机を叩く音等の低周波ノイズを
+    //     減衰させることを狙っている。
+    //   ・コンプレッサーは「声が小さい人と大きい人の差を縮めて、
+    //     全体として聞き取りやすくする」ことが目的のため、
+    //     ratioを強くしすぎず（4:1程度）、極端な音割れ的な圧縮は避けた。
+    //   ・段数はこの2つに絞り、モバイル端末への処理負荷を抑えている。
+    //
+    // 🛠 フォールバック：
+    //   AudioContext の生成やノード接続で例外が発生した場合、
+    //   前処理なしの生ストリームでそのまま録音を継続できるよう、
+    //   呼び出し元（startRecording）でtry/catchしてフォールバックする。
+    // ==========================================
     function buildAudioProcessingChain(rawStream) {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         if (!AudioContextClass) {
@@ -1072,20 +1164,25 @@
         }
 
         const audioContext = new AudioContextClass();
+
         const source = audioContext.createMediaStreamSource(rawStream);
 
+        // ハイパスフィルタ：低周波ノイズ（空調音・振動音等）を減衰
         const highpass = audioContext.createBiquadFilter();
         highpass.type = "highpass";
-        highpass.frequency.value = 100; 
+        highpass.frequency.value = 100; // 100Hz未満をカット
         highpass.Q.value = 0.7;
 
+        // ダイナミクスコンプレッサー：発話者間の音量差を圧縮し、
+        // 小さい声も相対的に聞き取りやすくする
         const compressor = audioContext.createDynamicsCompressor();
-        compressor.threshold.value = -28;  
+        compressor.threshold.value = -28;  // このレベルを超えた音から圧縮開始
         compressor.knee.value = 24;
-        compressor.ratio.value = 4;        
+        compressor.ratio.value = 4;        // 4:1の圧縮率（強すぎない設定）
         compressor.attack.value = 0.01;
         compressor.release.value = 0.25;
 
+        // MediaRecorderに渡すための出力先
         const destination = audioContext.createMediaStreamDestination();
 
         source.connect(highpass);
@@ -1099,6 +1196,10 @@
         };
     }
 
+    // 🌟 録音停止時・エラー時に、Web Audio API関連のリソースを
+    //   確実に解放するための共通ヘルパー。close()を呼び忘れると
+    //   AudioContextがリークし続け、特に長時間の利用でモバイル端末の
+    //   リソースを圧迫する可能性があるため、停止経路をすべてここに集約する。
     function teardownAudioProcessingChain() {
         if (AppState.audioContext) {
             try {
@@ -1114,6 +1215,18 @@
 
     async function startRecording() {
         try {
+            // 🌟【文字起こし精度向上対応】：
+            //   従来は { audio: true } のみを指定しており、ブラウザ・端末側が
+            //   持つ音声処理機能（エコーキャンセル、ノイズ抑制、自動音量調整）を
+            //   一切活用していなかった。
+            //   echoCancellation / noiseSuppression / autoGainControl を
+            //   明示的に有効化することで、多くのAndroid端末ではハードウェア
+            //   支援によるノイズ抑制・音量正規化が働くようになり、
+            //   Gemini側での聞き取り精度（[聞き取り不能]の発生率低減）が
+            //   改善することを期待した変更。
+            //   これらの制約は「ベストエフォート」であり、対応していない
+            //   端末・ブラウザでは単純に無視される（エラーにはならない）ため、
+            //   後方互換上のリスクは低い。
             AppState.rawMicStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
@@ -1122,6 +1235,13 @@
                 }
             });
 
+            // 🌟【文字起こし精度向上対応・Web Audio API前処理】：
+            //   生のマイクストリームに対してハイパスフィルタ＋
+            //   コンプレッサーをかけた後のストリームを、実際に
+            //   MediaRecorderへ渡すストリームとして採用する。
+            //   何らかの理由でフィルタチェーンの構築に失敗した場合は、
+            //   前処理なしの生ストリームにフォールバックし、
+            //   録音自体は継続できるようにする。
             let chain = null;
             try {
                 chain = buildAudioProcessingChain(AppState.rawMicStream);
@@ -1161,7 +1281,9 @@
             document.body.classList.add('recording-active');
 
             await requestWakeLock();
+
             resetPseudoSleepTimer();
+
             startElapsedTimeDisplay();
 
             let mimeType = 'audio/webm';
@@ -1175,6 +1297,11 @@
             startNewSegment();
 
         } catch (err) {
+            // 🌟【文字起こし精度向上対応・Web Audio API前処理】：
+            //   getUserMedia自体の失敗だけでなく、フィルタチェーン構築後の
+            //   処理（startNewSegment等）で例外が起きた場合も、
+            //   ここまでに確保したマイクストリーム・AudioContextが
+            //   残ったままにならないよう、念のため解放しておく。
             if (AppState.rawMicStream) {
                 AppState.rawMicStream.getTracks().forEach(track => track.stop());
                 AppState.rawMicStream = null;
@@ -1247,6 +1374,11 @@
             stopPseudoSleepCycle();
             releaseWakeLock();
 
+            // 🌟【文字起こし精度向上対応・Web Audio API前処理】：
+            //   予期しない中断時も、マイクストリーム（生・処理後の両方）と
+            //   AudioContextを確実に解放する。これを怠ると、録音が
+            //   異常終了した際に端末のマイクが「使用中」のまま残り、
+            //   次回の録音開始やマイクの権限周りで不具合が起きうる。
             if (AppState.globalStream) {
                 AppState.globalStream.getTracks().forEach(track => track.stop());
                 AppState.globalStream = null;
@@ -1349,6 +1481,18 @@
         try {
             await waitForRecorderToStop();
 
+            // 🌟【文字起こし精度向上対応・Web Audio API前処理】：
+            //   従来は AppState.globalStream（MediaRecorderに渡していた方の
+            //   ストリーム）のトラックだけを stop() していた。
+            //   前処理チェーンを導入した後は、globalStream が
+            //   processedStream（MediaStreamDestination由来）を指すため、
+            //   これだけを止めても「実際にマイクを掴んでいる」
+            //   rawMicStream 側のトラックは停止されず、マイクが
+            //   解放されない（端末のマイク使用中インジケーターが
+            //   消えない）不具合になる。
+            //   そのため、globalStream と rawMicStream の両方のトラックを
+            //   個別に停止し、AudioContext も teardownAudioProcessingChain()
+            //   で確実に close() する。
             if (AppState.globalStream) {
                 AppState.globalStream.getTracks().forEach(track => track.stop());
                 AppState.globalStream = null;
@@ -1379,6 +1523,16 @@
             const audioOk = audioSettled.status === 'fulfilled';
             const transcriptOk = transcriptSettled.status === 'fulfilled' && !!transcriptSettled.value;
 
+            if (!audioOk) {
+                console.error("❌ 音声確定処理が失敗しました:", audioSettled.reason);
+            }
+            if (!transcriptOk) {
+                console.error(
+                    "❌ 文字起こし処理が失敗しました:",
+                    transcriptSettled.status === 'rejected' ? transcriptSettled.reason : "(結果なし)"
+                );
+            }
+
             if (!audioOk && !transcriptOk) {
                 UI.progressTitle.innerHTML = "⚠️ 音声確認・文字起こしの両方に失敗しました";
                 UI.statusText.innerHTML = "エラー発生（お助けモードを確認してください）";
@@ -1387,7 +1541,9 @@
                     "音声データの確認と、AI文字起こしの両方に失敗しました。\n" +
                     "録音の各セグメントは、録音中にドライブの「レコーダー/音声データ」フォルダ内の" +
                     "会議名のついた専用フォルダへ、既に個別保存されている可能性が高いです。" +
-                    "お手数ですが、まずはそちらをご確認いただくか、「手動再開」からお試しください。\n\n"
+                    "お手数ですが、まずはそちらをご確認いただくか、「手動再開」からお試しください。\n\n" +
+                    "音声確認エラー: " + (audioOk ? "なし" : audioSettled.reason.message) + "\n" +
+                    "文字起こしエラー: " + (transcriptOk ? "なし" : (transcriptSettled.reason ? transcriptSettled.reason.message : "不明"))
                 );
                 return;
             }
@@ -1428,7 +1584,8 @@
             if (result.transcriptionWarning) {
                 alert(
                     "⚠️ 録音中に一部区間のAIアップロードが失敗していたため、その区間の内容は" +
-                    "文字起こし・議事録に反映されていません。\n" +
+                    "文字起こし・議事録に反映されていません。（該当区間: セグメント " +
+                    (result.missingChunkIndexes || []).join(", ") + "）\n" +
                     "該当区間の音声原本はドライブに保存されていますので、必要に応じてご確認ください。"
                 );
             }
