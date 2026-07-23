@@ -65,7 +65,7 @@ const DiagnosticsReporter = {
     formatReport: function(label, transcriptResult, minutesDiagnostics) {
         const lines = [];
         lines.push(`===== 診断レポート: ${label} =====`);
-        lines.push(`生成日時: ${new Date().toISOString()}lines.push(`生成日時: ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`);`);
+       lines.push(`生成日時: ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`);
 
         if (transcriptResult) {
             lines.push("");
