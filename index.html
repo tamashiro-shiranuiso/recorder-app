@@ -505,7 +505,17 @@
         isPseudoSleeping: false,
         audioSendQueue: Promise.resolve(),
         segmentTimerId: null,
-        isSegmentCycleActive: false
+        isSegmentCycleActive: false,
+        // 🌟【文字起こし精度向上対応・Web Audio API前処理】：
+        //   マイク入力（rawMicStream）に対してハイパスフィルタ＋
+        //   ダイナミクス圧縮をかけた後の出力ストリームを
+        //   processedStream として MediaRecorder に渡す。
+        //   停止時に audioContext を確実に close() するため、
+        //   関連ノード・ストリームをすべて保持しておく。
+        audioContext: null,
+        rawMicStream: null,      // getUserMediaの生ストリーム（トラック停止用に保持）
+        processedStream: null,   // フィルタ後の出力ストリーム（MediaRecorderに渡す方）
+        audioProcessingNodes: null // { source, highpass, compressor, destination }
     };
 
     const UI = {
@@ -992,6 +1002,93 @@
         }
     }
 
+    // ==========================================
+    // 🎚️ 音声前処理フィルタチェーン（Web Audio API）
+    //
+    // 🛠 目的：
+    //   getUserMedia の echoCancellation / noiseSuppression /
+    //   autoGainControl はブラウザ・端末依存のブラックボックス処理であり、
+    //   効果が不十分なケース（環境音が多い、複数人の音量差が大きい等）が
+    //   あるため、その手前でこちらでも制御できる軽量なフィルタを
+    //   追加でかけておく。
+    //
+    // 🛠 構成：
+    //   マイク入力 → ハイパスフィルタ（低周波ノイズ除去）
+    //             → ダイナミクスコンプレッサー（音量差の圧縮）
+    //             → MediaStreamDestination（MediaRecorderに渡す出力）
+    //
+    // 🛠 パラメータ選定の考え方：
+    //   ・ハイパスフィルタのカットオフは100Hz付近とした。人の声の
+    //     基本周波数（成人男性で概ね85〜180Hz、成人女性で165〜255Hz程度）
+    //     を削らない範囲で、空調音・振動音・机を叩く音等の低周波ノイズを
+    //     減衰させることを狙っている。
+    //   ・コンプレッサーは「声が小さい人と大きい人の差を縮めて、
+    //     全体として聞き取りやすくする」ことが目的のため、
+    //     ratioを強くしすぎず（4:1程度）、極端な音割れ的な圧縮は避けた。
+    //   ・段数はこの2つに絞り、モバイル端末への処理負荷を抑えている。
+    //
+    // 🛠 フォールバック：
+    //   AudioContext の生成やノード接続で例外が発生した場合、
+    //   前処理なしの生ストリームでそのまま録音を継続できるよう、
+    //   呼び出し元（startRecording）でtry/catchしてフォールバックする。
+    // ==========================================
+    function buildAudioProcessingChain(rawStream) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) {
+            console.warn("⚠️ この端末・ブラウザはWeb Audio APIに対応していません。前処理なしで録音します。");
+            return null;
+        }
+
+        const audioContext = new AudioContextClass();
+
+        const source = audioContext.createMediaStreamSource(rawStream);
+
+        // ハイパスフィルタ：低周波ノイズ（空調音・振動音等）を減衰
+        const highpass = audioContext.createBiquadFilter();
+        highpass.type = "highpass";
+        highpass.frequency.value = 100; // 100Hz未満をカット
+        highpass.Q.value = 0.7;
+
+        // ダイナミクスコンプレッサー：発話者間の音量差を圧縮し、
+        // 小さい声も相対的に聞き取りやすくする
+        const compressor = audioContext.createDynamicsCompressor();
+        compressor.threshold.value = -28;  // このレベルを超えた音から圧縮開始
+        compressor.knee.value = 24;
+        compressor.ratio.value = 4;        // 4:1の圧縮率（強すぎない設定）
+        compressor.attack.value = 0.01;
+        compressor.release.value = 0.25;
+
+        // MediaRecorderに渡すための出力先
+        const destination = audioContext.createMediaStreamDestination();
+
+        source.connect(highpass);
+        highpass.connect(compressor);
+        compressor.connect(destination);
+
+        return {
+            audioContext: audioContext,
+            processedStream: destination.stream,
+            nodes: { source, highpass, compressor, destination }
+        };
+    }
+
+    // 🌟 録音停止時・エラー時に、Web Audio API関連のリソースを
+    //   確実に解放するための共通ヘルパー。close()を呼び忘れると
+    //   AudioContextがリークし続け、特に長時間の利用でモバイル端末の
+    //   リソースを圧迫する可能性があるため、停止経路をすべてここに集約する。
+    function teardownAudioProcessingChain() {
+        if (AppState.audioContext) {
+            try {
+                AppState.audioContext.close();
+            } catch (e) {
+                console.warn("⚠️ AudioContextのclose()に失敗しました（無視して続行）:", e);
+            }
+        }
+        AppState.audioContext = null;
+        AppState.processedStream = null;
+        AppState.audioProcessingNodes = null;
+    }
+
     async function startRecording() {
         try {
             // 🌟【文字起こし精度向上対応】：
@@ -1006,13 +1103,39 @@
             //   これらの制約は「ベストエフォート」であり、対応していない
             //   端末・ブラウザでは単純に無視される（エラーにはならない）ため、
             //   後方互換上のリスクは低い。
-            AppState.globalStream = await navigator.mediaDevices.getUserMedia({
+            AppState.rawMicStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
                     autoGainControl: true
                 }
             });
+
+            // 🌟【文字起こし精度向上対応・Web Audio API前処理】：
+            //   生のマイクストリームに対してハイパスフィルタ＋
+            //   コンプレッサーをかけた後のストリームを、実際に
+            //   MediaRecorderへ渡すストリームとして採用する。
+            //   何らかの理由でフィルタチェーンの構築に失敗した場合は、
+            //   前処理なしの生ストリームにフォールバックし、
+            //   録音自体は継続できるようにする。
+            let chain = null;
+            try {
+                chain = buildAudioProcessingChain(AppState.rawMicStream);
+            } catch (audioChainError) {
+                console.warn("⚠️ 音声前処理チェーンの構築に失敗しました。前処理なしで録音を継続します:", audioChainError);
+                chain = null;
+            }
+
+            if (chain) {
+                AppState.audioContext = chain.audioContext;
+                AppState.processedStream = chain.processedStream;
+                AppState.audioProcessingNodes = chain.nodes;
+                AppState.globalStream = chain.processedStream;
+                console.log("🎚️ 音声前処理（ハイパスフィルタ＋コンプレッサー）を適用して録音します。");
+            } else {
+                AppState.globalStream = AppState.rawMicStream;
+                console.log("ℹ️ 音声前処理なしで録音します（生のマイク入力をそのまま使用）。");
+            }
 
             if (window.appController) window.appController.startNewSession();
 
@@ -1050,6 +1173,21 @@
             startNewSegment();
 
         } catch (err) {
+            // 🌟【文字起こし精度向上対応・Web Audio API前処理】：
+            //   getUserMedia自体の失敗だけでなく、フィルタチェーン構築後の
+            //   処理（startNewSegment等）で例外が起きた場合も、
+            //   ここまでに確保したマイクストリーム・AudioContextが
+            //   残ったままにならないよう、念のため解放しておく。
+            if (AppState.rawMicStream) {
+                AppState.rawMicStream.getTracks().forEach(track => track.stop());
+                AppState.rawMicStream = null;
+            }
+            if (AppState.globalStream) {
+                AppState.globalStream.getTracks().forEach(track => track.stop());
+                AppState.globalStream = null;
+            }
+            teardownAudioProcessingChain();
+
             alert("マイクのアクセスが許可されませんでした。ブラウザの設定を確認してください。");
             console.error("Audio Error:", err);
         }
@@ -1111,6 +1249,22 @@
             stopElapsedTimeDisplay();
             stopPseudoSleepCycle();
             releaseWakeLock();
+
+            // 🌟【文字起こし精度向上対応・Web Audio API前処理】：
+            //   予期しない中断時も、マイクストリーム（生・処理後の両方）と
+            //   AudioContextを確実に解放する。これを怠ると、録音が
+            //   異常終了した際に端末のマイクが「使用中」のまま残り、
+            //   次回の録音開始やマイクの権限周りで不具合が起きうる。
+            if (AppState.globalStream) {
+                AppState.globalStream.getTracks().forEach(track => track.stop());
+                AppState.globalStream = null;
+            }
+            if (AppState.rawMicStream) {
+                AppState.rawMicStream.getTracks().forEach(track => track.stop());
+                AppState.rawMicStream = null;
+            }
+            teardownAudioProcessingChain();
+
             document.body.classList.remove('recording-active');
             UI.mainRecordBtn.classList.remove('recording');
             UI.mainRecordBtn.innerHTML = "🎤";
@@ -1203,10 +1357,27 @@
         try {
             await waitForRecorderToStop();
 
+            // 🌟【文字起こし精度向上対応・Web Audio API前処理】：
+            //   従来は AppState.globalStream（MediaRecorderに渡していた方の
+            //   ストリーム）のトラックだけを stop() していた。
+            //   前処理チェーンを導入した後は、globalStream が
+            //   processedStream（MediaStreamDestination由来）を指すため、
+            //   これだけを止めても「実際にマイクを掴んでいる」
+            //   rawMicStream 側のトラックは停止されず、マイクが
+            //   解放されない（端末のマイク使用中インジケーターが
+            //   消えない）不具合になる。
+            //   そのため、globalStream と rawMicStream の両方のトラックを
+            //   個別に停止し、AudioContext も teardownAudioProcessingChain()
+            //   で確実に close() する。
             if (AppState.globalStream) {
                 AppState.globalStream.getTracks().forEach(track => track.stop());
                 AppState.globalStream = null;
             }
+            if (AppState.rawMicStream) {
+                AppState.rawMicStream.getTracks().forEach(track => track.stop());
+                AppState.rawMicStream = null;
+            }
+            teardownAudioProcessingChain();
 
             UI.statusText.innerHTML = "✨ 最後の音声データを保存・アップロード中...";
             await AppState.audioSendQueue;
