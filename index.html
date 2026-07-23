@@ -478,8 +478,8 @@
     </div>
 </div>
 
-<!-- キャッシュ強制回避用のバージョン記述を追加(v=5.0 診断ログ強化対応版) -->
-<script src="js/recorder-controller.js?v=5.0"></script>
+<!-- キャッシュ強制回避用のバージョン記述を追加(v=5.1 音声制約追加対応版) -->
+<script src="js/recorder-controller.js?v=5.1"></script>
 
 <script>
     // ==========================================
@@ -994,7 +994,25 @@
 
     async function startRecording() {
         try {
-            AppState.globalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            // 🌟【文字起こし精度向上対応】：
+            //   従来は { audio: true } のみを指定しており、ブラウザ・端末側が
+            //   持つ音声処理機能（エコーキャンセル、ノイズ抑制、自動音量調整）を
+            //   一切活用していなかった。
+            //   echoCancellation / noiseSuppression / autoGainControl を
+            //   明示的に有効化することで、多くのAndroid端末ではハードウェア
+            //   支援によるノイズ抑制・音量正規化が働くようになり、
+            //   Gemini側での聞き取り精度（[聞き取り不能]の発生率低減）が
+            //   改善することを期待した変更。
+            //   これらの制約は「ベストエフォート」であり、対応していない
+            //   端末・ブラウザでは単純に無視される（エラーにはならない）ため、
+            //   後方互換上のリスクは低い。
+            AppState.globalStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            });
 
             if (window.appController) window.appController.startNewSession();
 
