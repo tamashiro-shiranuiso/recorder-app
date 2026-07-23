@@ -556,7 +556,27 @@
 </div>
 
 <!-- キャッシュ強制回避用のバージョン記述を追加(v=5.1 音声制約追加対応版) -->
-<script src="js/recorder-controller.js?v=5.1"></script>
+<script src="js/recorder-controller.js?v=5.1"
+    onload="window.__rcLoadStatus = '✅ 読み込み成功'; console.log('recorder-controller.js 読み込み成功');"
+    onerror="window.__rcLoadStatus = '❌ 読み込み失敗（404等）: ' + this.src; console.error('recorder-controller.js 読み込み失敗:', this.src);"
+></script>
+<!-- 🔍【デバッグ対応・一時追加】：
+     recorder-controller.js の読み込み自体が成功しているかどうかを、
+     ページ表示直後にアラートで可視化する。実際に読み込みに使われた
+     完全なURL（this.src）もあわせて表示することで、GitHub Pagesの
+     パス解決が想定通りか確認できるようにする。原因判明後は削除する。 -->
+<script>
+    window.addEventListener('DOMContentLoaded', () => {
+        setTimeout(() => {
+            alert(
+                "【スクリプト読み込み診断】\n" +
+                "recorder-controller.js: " + (window.__rcLoadStatus || "(状態不明・onload/onerrorが発火していない)") + "\n" +
+                "現在のページURL: " + window.location.href + "\n" +
+                "window.appControllerは存在するか: " + (!!window.appController)
+            );
+        }, 500);
+    });
+</script>
 
 <script>
     // ==========================================
