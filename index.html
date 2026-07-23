@@ -1,6 +1,23 @@
 <!DOCTYPE html>
 <html lang="ja">
-<head>
+<script>
+    // 🔍【デバッグ対応・一時追加】：
+    //   recorder-controller.js の実行中に発生したエラーを
+    //   その場でアラート表示して可視化する。
+    //   このスクリプトは他のどの<script>よりも先に読み込まれる
+    //   必要があるため、</head>の直前（他のscriptタグより前）に置く。
+    window.onerror = function(message, source, lineno, colno, error) {
+        alert(
+            "【JavaScriptエラー検知】\n" +
+            "エラー内容: " + message + "\n" +
+            "発生ファイル: " + source + "\n" +
+            "行番号: " + lineno + " 列番号: " + colno + "\n" +
+            "スタック: " + (error && error.stack ? error.stack.substring(0, 300) : "(なし)")
+        );
+        return false;
+    };
+</script>
+</head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>レコーダーアプリ</title>
