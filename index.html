@@ -59,7 +59,70 @@
             letter-spacing: -0.5px;
         }
         
-        .header-actions { display: flex; gap: 12px; align-items: center; }
+        .header-actions { position: relative; display: flex; align-items: center; }
+
+        /* 🌟【見た目調整対応・新設】：
+           ヘッダーの「⋮」ボタンから開くドロップダウンメニュー。
+           手動再開・診断情報・設定の3項目をここに集約する。
+           他のパネル（recovery-panel系）とは別の見た目にし、
+           「ヘッダー直下に浮くメニュー」であることが分かるようにした。 */
+        .header-menu {
+            display: none;
+            position: absolute;
+            top: calc(100% + 8px);
+            right: 0;
+            min-width: 180px;
+            background-color: #ffffff;
+            border: 1px solid #e9ecef;
+            border-radius: 16px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+            padding: 6px;
+            z-index: 100;
+        }
+        .header-menu.open {
+            display: block;
+        }
+        .header-menu-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 10px 12px;
+            background: none;
+            border: none;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #495057;
+            text-align: left;
+            cursor: pointer;
+            transition: background-color 0.15s ease;
+        }
+        .header-menu-item:hover {
+            background-color: #f1f3f5;
+        }
+        .header-menu-icon {
+            font-size: 15px;
+            width: 20px;
+            text-align: center;
+        }
+        body.recording-active .header-menu {
+            background-color: #1c1e22;
+            border-color: #3a3d44;
+        }
+        body.recording-active .header-menu-item {
+            color: #d0d3d8;
+        }
+        body.recording-active .header-menu-item:hover {
+            background-color: #2a2d33;
+        }
+        /* 🌟 メニュー展開中は「⋮」ボタンも他のアイコンボタン同様
+           active-panel と同じ強調色にする。 */
+        #headerMenuBtn.active-panel {
+            background: #e7f5ff;
+            color: #4dabf7;
+        }
 
         .btn-icon {
             background: #f1f3f5; border: none; width: 40px; height: 40px;
@@ -382,12 +445,26 @@
 <div class="app-container">
     <div class="header">
         <h2>🎙 レコーダー</h2>
+        <!-- 🌟【見た目調整対応・変更点】：
+             従来はタイトルと「手動再開・診断情報・設定」の3ボタンが
+             同じ行に横並びになっており、スマホの画面幅ではタイトルが
+             1行に収まらず折り返されてしまっていた。
+             3ボタンを1つの「⋮（その他）」メニューに集約し、ヘッダーは
+             常に「タイトル＋メニューボタン1個」の2要素だけにすることで、
+             画面幅に関わらずタイトルが確実に1行に収まるようにした。 -->
         <div class="header-actions">
-            <button class="btn-pill" title="手動で途中から再開する" id="showRecoveryBtn">
-                <span>🛠</span> 手動再開
-            </button>
-            <button class="btn-icon" title="診断情報を確認する" id="showDiagnosticsBtn">🩺</button>
-            <button class="btn-icon" title="設定" id="settingsBtn">⚙️</button>
+            <button class="btn-icon" title="メニュー" id="headerMenuBtn" aria-haspopup="true" aria-expanded="false">⋮</button>
+            <div class="header-menu" id="headerMenu">
+                <button class="header-menu-item" id="showRecoveryBtn">
+                    <span class="header-menu-icon">🛠</span> 手動再開
+                </button>
+                <button class="header-menu-item" id="showDiagnosticsBtn">
+                    <span class="header-menu-icon">🩺</span> 診断情報
+                </button>
+                <button class="header-menu-item" id="settingsBtn">
+                    <span class="header-menu-icon">⚙️</span> 設定
+                </button>
+            </div>
         </div>
     </div>
 
@@ -545,7 +622,10 @@
         showDiagnosticsBtn: document.getElementById('showDiagnosticsBtn'),
         diagnosticsPanel: document.getElementById('diagnosticsPanel'),
         diagnosticsText: document.getElementById('diagnosticsText'),
-        copyDiagnosticsBtn: document.getElementById('copyDiagnosticsBtn')
+        copyDiagnosticsBtn: document.getElementById('copyDiagnosticsBtn'),
+        // 🌟 新設（見た目調整対応）：ヘッダーの「⋮」その他メニュー
+        headerMenuBtn: document.getElementById('headerMenuBtn'),
+        headerMenu: document.getElementById('headerMenu')
     };
 
     // ==========================================
@@ -606,6 +686,13 @@
         //   あり、UIの見た目も揃いにくかった。togglePanel() に集約し、
         //   ヘッダーのボタン側にも「今開いているパネルはどれか」が
         //   一目で分かるよう active-panel クラスを付け外しする。
+        //
+        // 🛠【見た目調整対応・変更点】：
+        //   3つのボタンをヘッダー直下の「⋮」その他メニュー内に
+        //   移設したことに伴い、togglePanel() 呼び出し前に必ず
+        //   ヘッダーメニュー自体を閉じるようにした
+        //   （メニュー項目をタップしたら、メニューは閉じてパネルだけが
+        //   開く、という一般的なドロップダウンメニューの挙動に揃える）。
         // ==========================================
         const ALL_PANELS = [
             { panel: UI.recoveryPanel, btn: UI.showRecoveryBtn },
@@ -613,8 +700,16 @@
             { panel: UI.diagnosticsPanel, btn: UI.showDiagnosticsBtn }
         ];
 
+        function closeHeaderMenu() {
+            UI.headerMenu.classList.remove('open');
+            UI.headerMenuBtn.classList.remove('active-panel');
+            UI.headerMenuBtn.setAttribute('aria-expanded', 'false');
+        }
+
         function togglePanel(targetPanel, targetBtn, onOpen) {
             const isCurrentlyOpen = targetPanel.style.display === 'block';
+
+            closeHeaderMenu();
 
             ALL_PANELS.forEach(({ panel, btn }) => {
                 panel.style.display = 'none';
@@ -628,6 +723,35 @@
                 if (onOpen) onOpen();
             }
         }
+
+        // 🌟 新設（見た目調整対応）：ヘッダーの「⋮」その他メニューの開閉。
+        //   メニューを開くタイミングで、他の3パネルは念のため閉じておく
+        //   （メニューを開いた直後にパネルが被って表示される事故を防ぐ）。
+        UI.headerMenuBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = UI.headerMenu.classList.contains('open');
+
+            if (isOpen) {
+                closeHeaderMenu();
+                return;
+            }
+
+            ALL_PANELS.forEach(({ panel, btn }) => {
+                panel.style.display = 'none';
+                if (btn) btn.classList.remove('active-panel');
+            });
+
+            UI.headerMenu.classList.add('open');
+            UI.headerMenuBtn.classList.add('active-panel');
+            UI.headerMenuBtn.setAttribute('aria-expanded', 'true');
+        });
+
+        // 🌟 メニュー外をタップ・クリックしたら自動的に閉じる。
+        document.addEventListener('click', (e) => {
+            if (UI.headerMenu.classList.contains('open') && !UI.headerMenu.contains(e.target)) {
+                closeHeaderMenu();
+            }
+        });
 
         // 🌟 変更点（自動再開対応）：お助けモードを開いたタイミングで、
         //   保存済みsessionIdを使った自動状態確認（checkRecoveryStatus）を実行する。
