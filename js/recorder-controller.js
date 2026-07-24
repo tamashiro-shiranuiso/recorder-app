@@ -65,7 +65,15 @@ const DiagnosticsReporter = {
     formatReport: function(label, transcriptResult, minutesDiagnostics) {
         const lines = [];
         lines.push(`===== 診断レポート: ${label} =====`);
-       lines.push(`生成日時: ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`);
+        // 🌟【タイムゾーン表記修正】：
+        //   従来は toISOString() を使用しており、常にUTC（末尾のZが目印）で
+        //   出力されていた。実行環境（Androidスマホ等）の設定に関わらず
+        //   UTC固定のため、日本時間として読むと実際の時刻より9時間前の
+        //   表記になってしまっていた。GAS側（コード.gs）は
+        //   Utilities.formatDate(..., "Asia/Tokyo", ...) で日本時間を
+        //   明示している箇所が多いため、フロント側のこの診断ログも
+        //   日本時間表記に揃える。
+        lines.push(`生成日時: ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`);
 
         if (transcriptResult) {
             lines.push("");
@@ -709,6 +717,11 @@ class RecorderController {
         }
     }
 
+    // 🔍【デバッグ対応・一時変更】：
+    //   GASから実際に返ってきたレスポンス（HTTPステータス、生テキスト、
+    //   JSONパース結果、data.errorの中身）をその場でアラート表示し、
+    //   「不明なエラー」の実体を確認できるようにした。
+    //   原因判明後は元の簡潔な実装に戻す想定。
     async callGasApi(payload) {
         if (!this.gasUrl) throw new Error("GASのURLが設定されていません。");
         
@@ -717,9 +730,32 @@ class RecorderController {
             headers: { 'Content-Type': 'text/plain' },
             body: JSON.stringify(payload)
         });
-        
-        const data = await response.json();
+
+        // 🔍 デバッグ用：GASから返ってきた生のレスポンスをそのまま確認する
+        const rawText = await response.text();
+        console.log(`📡 callGasApi [${payload.action}] httpStatus=${response.status}, rawResponse(先頭500文字)=`, rawText.substring(0, 500));
+
+        let data;
+        try {
+            data = JSON.parse(rawText);
+        } catch (parseErr) {
+            alert(
+                "【GAS通信デバッグ】\n" +
+                "action: " + payload.action + "\n" +
+                "httpStatus: " + response.status + "\n" +
+                "JSONパース失敗。生レスポンス(先頭300文字):\n" + rawText.substring(0, 300)
+            );
+            throw new Error("GASレスポンスのJSONパースに失敗しました。httpStatus=" + response.status);
+        }
+
         if (!data.success) {
+            alert(
+                "【GAS通信デバッグ】\n" +
+                "action: " + payload.action + "\n" +
+                "httpStatus: " + response.status + "\n" +
+                "data.success: false\n" +
+                "data.error: " + (data.error || "(空)")
+            );
             throw new Error(data.error || "GAS側で不明なエラーが発生しました");
         }
         return data.data;
