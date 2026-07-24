@@ -218,6 +218,53 @@ const DiagnosticsReporter = {
         if (textarea) {
             textarea.value = "";
         }
+    },
+
+    // 🌟【デバッグ機能の恒久化・統合対応】：
+    //   callGasApi でGAS通信が失敗した際（JSONパース失敗、
+    //   data.success:false 等）の詳細を、アラートで都度中断させる
+    //   のではなく、他の診断レポートと同じ形式で reports 配列に
+    //   蓄積する。これにより、録音中の操作は止めずに、後から
+    //   🩺診断パネルで通信エラーの詳細（action名・httpStatus・
+    //   エラー内容・レスポンス本文の先頭部分）を確認できるように
+    //   する。異常発生時のパネル自動オープンは report() 側の
+    //   ロジックと同様に行う。
+    reportCommError: function(action, httpStatus, errorSummary, rawSnippet) {
+        const lines = [];
+        lines.push(`===== GAS通信エラー: ${action} =====`);
+        lines.push(`発生日時: ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`);
+        lines.push(`httpStatus: ${httpStatus}`);
+        lines.push(`エラー内容: ${errorSummary}`);
+        if (rawSnippet) {
+            lines.push(`レスポンス本文(先頭300文字): ${rawSnippet}`);
+        }
+        lines.push("=================================");
+        const reportText = lines.join("\n");
+
+        console.error(reportText);
+        this.reports.push(reportText);
+
+        const combinedText =
+            `【${this.reports.length}件のレポートを表示中（古い順・最新は末尾）】\n\n` +
+            this.reports.join("\n\n");
+        window.lastDiagnosticsText = combinedText;
+
+        const textarea = document.getElementById('diagnosticsText');
+        if (textarea) {
+            textarea.value = combinedText;
+            textarea.scrollTop = textarea.scrollHeight;
+        }
+
+        // 🌟 通信エラーは常に「異常」なので、診断パネルを自動的に開く。
+        const wrapper = document.getElementById('diagnosticsPanel');
+        const btn = document.getElementById('showDiagnosticsBtn');
+        if (wrapper) {
+            wrapper.style.display = 'block';
+            wrapper.classList.add('fade-in');
+        }
+        if (btn) {
+            btn.classList.add('active-panel');
+        }
     }
 };
 
@@ -717,44 +764,41 @@ class RecorderController {
         }
     }
 
-    // 🔍【デバッグ対応・一時変更】：
-    //   GASから実際に返ってきたレスポンス（HTTPステータス、生テキスト、
-    //   JSONパース結果、data.errorの中身）をその場でアラート表示し、
-    //   「不明なエラー」の実体を確認できるようにした。
-    //   原因判明後は元の簡潔な実装に戻す想定。
+    // 🌟【デバッグ機能の恒久化・統合対応】：
+    //   GASとの通信に失敗した場合（JSONパース失敗、data.success:false等）、
+    //   従来は原因調査のためアラートで即座に中断表示していたが、
+    //   原因調査が完了したため、操作を妨げないログ記録方式に統合した。
+    //   詳細は DiagnosticsReporter.reportCommError() に記録され、
+    //   🩺診断パネルから後で確認できる（異常時は自動的にパネルが開く）。
     async callGasApi(payload) {
         if (!this.gasUrl) throw new Error("GASのURLが設定されていません。");
-        
+
         const response = await fetch(this.gasUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain' },
             body: JSON.stringify(payload)
         });
 
-        // 🔍 デバッグ用：GASから返ってきた生のレスポンスをそのまま確認する
         const rawText = await response.text();
-        console.log(`📡 callGasApi [${payload.action}] httpStatus=${response.status}, rawResponse(先頭500文字)=`, rawText.substring(0, 500));
 
         let data;
         try {
             data = JSON.parse(rawText);
         } catch (parseErr) {
-            alert(
-                "【GAS通信デバッグ】\n" +
-                "action: " + payload.action + "\n" +
-                "httpStatus: " + response.status + "\n" +
-                "JSONパース失敗。生レスポンス(先頭300文字):\n" + rawText.substring(0, 300)
+            DiagnosticsReporter.reportCommError(
+                payload.action,
+                response.status,
+                "GASレスポンスのJSONパースに失敗しました。",
+                rawText.substring(0, 300)
             );
             throw new Error("GASレスポンスのJSONパースに失敗しました。httpStatus=" + response.status);
         }
 
         if (!data.success) {
-            alert(
-                "【GAS通信デバッグ】\n" +
-                "action: " + payload.action + "\n" +
-                "httpStatus: " + response.status + "\n" +
-                "data.success: false\n" +
-                "data.error: " + (data.error || "(空)")
+            DiagnosticsReporter.reportCommError(
+                payload.action,
+                response.status,
+                data.error || "(GAS側からエラー内容が返されませんでした)"
             );
             throw new Error(data.error || "GAS側で不明なエラーが発生しました");
         }
