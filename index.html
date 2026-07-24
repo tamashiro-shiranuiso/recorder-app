@@ -1,23 +1,6 @@
 <!DOCTYPE html>
 <html lang="ja">
-<script>
-    // 🔍【デバッグ対応・一時追加】：
-    //   recorder-controller.js の実行中に発生したエラーを
-    //   その場でアラート表示して可視化する。
-    //   このスクリプトは他のどの<script>よりも先に読み込まれる
-    //   必要があるため、</head>の直前（他のscriptタグより前）に置く。
-    window.onerror = function(message, source, lineno, colno, error) {
-        alert(
-            "【JavaScriptエラー検知】\n" +
-            "エラー内容: " + message + "\n" +
-            "発生ファイル: " + source + "\n" +
-            "行番号: " + lineno + " 列番号: " + colno + "\n" +
-            "スタック: " + (error && error.stack ? error.stack.substring(0, 300) : "(なし)")
-        );
-        return false;
-    };
-</script>
-</head>
+<head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>レコーダーアプリ</title>
@@ -572,28 +555,14 @@
     </div>
 </div>
 
-<!-- キャッシュ強制回避用のバージョン記述を追加(v=5.1 音声制約追加対応版) -->
-<script src="js/recorder-controller.js?v=5.1"
-    onload="window.__rcLoadStatus = '✅ 読み込み成功'; console.log('recorder-controller.js 読み込み成功');"
-    onerror="window.__rcLoadStatus = '❌ 読み込み失敗（404等）: ' + this.src; console.error('recorder-controller.js 読み込み失敗:', this.src);"
+<!-- キャッシュ強制回避用のバージョン記述を追加(v=5.2 デバッグ整理版) -->
+<!-- 🌟 recorder-controller.js の読み込み成否はコンソールログにのみ残す。
+     読み込みに失敗した場合はコンソールで確認できる（通常操作の
+     妨げにならないよう、アラートでのポップアップは行わない）。 -->
+<script src="js/recorder-controller.js?v=5.2"
+    onload="console.log('✅ recorder-controller.js 読み込み成功');"
+    onerror="console.error('❌ recorder-controller.js 読み込み失敗:', this.src);"
 ></script>
-<!-- 🔍【デバッグ対応・一時追加】：
-     recorder-controller.js の読み込み自体が成功しているかどうかを、
-     ページ表示直後にアラートで可視化する。実際に読み込みに使われた
-     完全なURL（this.src）もあわせて表示することで、GitHub Pagesの
-     パス解決が想定通りか確認できるようにする。原因判明後は削除する。 -->
-<script>
-    window.addEventListener('DOMContentLoaded', () => {
-        setTimeout(() => {
-            alert(
-                "【スクリプト読み込み診断】\n" +
-                "recorder-controller.js: " + (window.__rcLoadStatus || "(状態不明・onload/onerrorが発火していない)") + "\n" +
-                "現在のページURL: " + window.location.href + "\n" +
-                "window.appControllerは存在するか: " + (!!window.appController)
-            );
-        }, 500);
-    });
-</script>
 
 <script>
     // ==========================================
@@ -813,18 +782,7 @@
             if(url) {
                 localStorage.setItem('saved_gas_url', url);
                 if(window.appController) window.appController.gasUrl = url;
-
-                // 🔍 デバッグ用：実際に何が保存され、何が読み取れているかを可視化
-                const savedInLocalStorage = localStorage.getItem('saved_gas_url');
-                const onController = window.appController ? window.appController.gasUrl : "(appController無し)";
-                alert(
-                    "【デバッグ情報】\n" +
-                    "入力欄の値: " + url + "\n" +
-                    "localStorageに保存された値: " + savedInLocalStorage + "\n" +
-                    "appController.gasUrlの値: " + onController + "\n" +
-                    "window.appControllerは存在するか: " + (!!window.appController)
-                );
-
+                alert("設定を保存しました！");
                 UI.settingsPanel.style.display = 'none';
                 UI.settingsBtn.classList.remove('active-panel');
             } else {
