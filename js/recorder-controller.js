@@ -36,8 +36,83 @@
 const CONFIG = {
     GAS_URL: localStorage.getItem('saved_gas_url') || "",
     MAX_RETRIES: 3,
-    STORAGE_KEY: "recorder_app_state"
+    STORAGE_KEY: "recorder_app_state",
+    // 🌟【キュー待ち対応・新設】：
+    //   GAS Web Appへの同時アクセス数の上限。Google Apps Scriptには
+    //   「1ユーザーあたり同時実行30まで」という制限があり、これを
+    //   超えるとリクエスト自体が失敗する。録音中は appendAudioChunk /
+    //   uploadChunkToGemini の2系統が並行して走り、リトライも重なる
+    //   可能性があるため、クライアント側であらかじめ同時送信数を
+    //   絞っておくことで、GAS側の制限に達する前に自然な順番待ちを
+    //   発生させる。値は保守的に2としている。
+    MAX_CONCURRENT_REQUESTS: 2
 };
+
+// ==========================================
+// 🌟【キュー待ち対応・新設】：GASへの同時リクエスト数を制限するキュー
+//
+// 🛠 設計方針：
+//   録音中は複数のチャンク（10分ごと）が次々に生成され、それぞれ
+//   appendAudioChunk（ドライブ保存）と uploadChunkToGemini（Gemini
+//   アップロード）の2系統のリクエストが並行して飛ぶ。長時間録音や
+//   再送（リトライ）が重なると、瞬間的に多数のリクエストが同時に
+//   GASへ送られる可能性があり、GAS側の同時実行数制限
+//   （1ユーザーあたり30）に達するとリクエストが失敗する。
+//
+//   このキューは、実行中のリクエスト数が MAX_CONCURRENT_REQUESTS を
+//   超えないよう、超過分を「空きが出るまで待機」させる。
+//   これにより、GAS側の制限に近づく前に、クライアント側で自然な
+//   順番待ちを発生させ、失敗ではなく「少し待ってから実行される」
+//   という穏やかな挙動にする。
+//
+//   スコープは「録音中のチャンク送信」のみに限定している（複数の
+//   会議・セッションを跨いだキューは、GAS側での非同期ジョブ管理が
+//   必要になり大掛かりな改修になるため、別途まとめて検討する）。
+// ==========================================
+class RequestQueue {
+    constructor(maxConcurrent) {
+        this.maxConcurrent = maxConcurrent;
+        this.running = 0;
+        this.waitingQueue = [];
+    }
+
+    // 🌟 taskFn（Promiseを返す関数）をキューに投入する。
+    //   実行中の件数が上限未満ならすぐに実行し、上限に達している
+    //   場合は待機列に積んで、空きが出た順に実行する（先入れ先出し）。
+    enqueue(taskFn) {
+        return new Promise((resolve, reject) => {
+            const run = async () => {
+                this.running++;
+                try {
+                    const result = await taskFn();
+                    resolve(result);
+                } catch (err) {
+                    reject(err);
+                } finally {
+                    this.running--;
+                    this._runNext();
+                }
+            };
+
+            if (this.running < this.maxConcurrent) {
+                run();
+            } else {
+                this.waitingQueue.push(run);
+                console.log(
+                    `⏳ RequestQueue: 同時実行数の上限（${this.maxConcurrent}）に達したため、` +
+                    `待機列に追加しました。現在の待機数=${this.waitingQueue.length}`
+                );
+            }
+        });
+    }
+
+    _runNext() {
+        if (this.waitingQueue.length > 0 && this.running < this.maxConcurrent) {
+            const next = this.waitingQueue.shift();
+            next();
+        }
+    }
+}
 
 // ==========================================
 // 🌟 診断情報の整形・保持担当（診断ログ蓄積対応）
@@ -281,6 +356,9 @@ class RecorderController {
         this.isFinalizingAudio = false;
 
         this.audioAppendFailures = [];
+
+        // 🌟【キュー待ち対応・新設】：GASへの同時リクエスト数を制限するキュー。
+        this.requestQueue = new RequestQueue(config.MAX_CONCURRENT_REQUESTS || 2);
     }
 
     // --- 部署1: 記憶・進捗管理担当 ---
@@ -770,39 +848,48 @@ class RecorderController {
     //   原因調査が完了したため、操作を妨げないログ記録方式に統合した。
     //   詳細は DiagnosticsReporter.reportCommError() に記録され、
     //   🩺診断パネルから後で確認できる（異常時は自動的にパネルが開く）。
+    //
+    // 🌟【キュー待ち対応・変更点】：
+    //   実際の通信処理（fetch〜レスポンス解析）を requestQueue.enqueue()
+    //   でラップした。これにより、callGasApi を呼び出す全ての箇所
+    //   （appendAudioChunk, uploadChunkToGeminiAndStore,
+    //   finalizeAudioAndGetResult 等）が自動的に同時実行数制限の
+    //   恩恵を受ける。呼び出し元のコードは一切変更不要。
     async callGasApi(payload) {
         if (!this.gasUrl) throw new Error("GASのURLが設定されていません。");
 
-        const response = await fetch(this.gasUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain' },
-            body: JSON.stringify(payload)
+        return this.requestQueue.enqueue(async () => {
+            const response = await fetch(this.gasUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain' },
+                body: JSON.stringify(payload)
+            });
+
+            const rawText = await response.text();
+
+            let data;
+            try {
+                data = JSON.parse(rawText);
+            } catch (parseErr) {
+                DiagnosticsReporter.reportCommError(
+                    payload.action,
+                    response.status,
+                    "GASレスポンスのJSONパースに失敗しました。",
+                    rawText.substring(0, 300)
+                );
+                throw new Error("GASレスポンスのJSONパースに失敗しました。httpStatus=" + response.status);
+            }
+
+            if (!data.success) {
+                DiagnosticsReporter.reportCommError(
+                    payload.action,
+                    response.status,
+                    data.error || "(GAS側からエラー内容が返されませんでした)"
+                );
+                throw new Error(data.error || "GAS側で不明なエラーが発生しました");
+            }
+            return data.data;
         });
-
-        const rawText = await response.text();
-
-        let data;
-        try {
-            data = JSON.parse(rawText);
-        } catch (parseErr) {
-            DiagnosticsReporter.reportCommError(
-                payload.action,
-                response.status,
-                "GASレスポンスのJSONパースに失敗しました。",
-                rawText.substring(0, 300)
-            );
-            throw new Error("GASレスポンスのJSONパースに失敗しました。httpStatus=" + response.status);
-        }
-
-        if (!data.success) {
-            DiagnosticsReporter.reportCommError(
-                payload.action,
-                response.status,
-                data.error || "(GAS側からエラー内容が返されませんでした)"
-            );
-            throw new Error(data.error || "GAS側で不明なエラーが発生しました");
-        }
-        return data.data;
     }
 
     hasPendingSession() {
